@@ -27,10 +27,10 @@ export async function POST(req: NextRequest) {
       });
     }
 
-    return NextResponse.json(
-      { success: false, error: `No data available for ${cleanSymbol}` },
-      { status: 404 },
-    );
+    return NextResponse.json({
+      success: false,
+      error: `No data available for ${cleanSymbol}`,
+    }, { status: 200 });
   } catch (error) {
     console.error('❌ fetch-price error:', error);
     return NextResponse.json(

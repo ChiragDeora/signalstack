@@ -42,3 +42,6 @@ next-env.d.ts
 
 # Dhan scrip master disk cache
 .scrip-cache.json
+
+# clerk configuration (can include secrets)
+/.clerk/

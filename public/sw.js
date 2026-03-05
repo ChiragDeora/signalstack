@@ -4,7 +4,7 @@
 // Handles push notifications and basic caching
 // for PWA "Add to Home Screen" support.
 
-const CACHE_NAME = 'signalstack-v1';
+const CACHE_NAME = 'signalstack-v2';
 
 // Install: cache essential assets
 self.addEventListener('install', (event) => {
@@ -73,11 +73,12 @@ self.addEventListener('push', (event) => {
     badge: '/signalstack-logo.png',
     tag: data.tag || 'signalstack-alert',
     vibrate: [200, 100, 200],
+    renotify: true,
     data: {
       url: data.url || '/',
     },
     actions: [
-      { action: 'open', title: 'Open App' },
+      { action: 'open', title: 'Open' },
       { action: 'dismiss', title: 'Dismiss' },
     ],
   };

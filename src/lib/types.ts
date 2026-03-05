@@ -64,8 +64,9 @@ export interface CrossoverAlert {
   source: string;
 }
 
-// Watch configuration for monitoring a symbol
+// Watch configuration for monitoring a symbol (userId for per-user segregation)
 export interface WatchConfig {
+  userId?: string; // Clerk user id – used to segregate polls and enforce per-user limits
   symbol: string;
   timeframe: string;
   emaPeriods: number[];
@@ -102,6 +103,7 @@ export interface PushSubscriptionData {
 // Socket.IO event payloads
 export interface PriceUpdate {
   symbol: string;
+  timeframe?: string;
   price: number;
   change: number;
   changePercent: number;

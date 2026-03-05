@@ -19,8 +19,9 @@ interface SymbolState {
 export class EMAEngine {
   private symbols: Map<string, SymbolState> = new Map();
 
-  private makeKey(symbol: string, timeframe: string): string {
-    return `${symbol.toUpperCase()}:${timeframe}`;
+  private makeKey(symbol: string, timeframe: string, userId?: string): string {
+    const sym = symbol.toUpperCase();
+    return userId ? `${userId}:${sym}:${timeframe}` : `${sym}:${timeframe}`;
   }
 
   /**
@@ -28,11 +29,11 @@ export class EMAEngine {
    * Creates EMA calculators and crossover detectors for all pairs.
    */
   addWatch(config: WatchConfig): void {
-    const key = this.makeKey(config.symbol, config.timeframe);
+    const key = this.makeKey(config.symbol, config.timeframe, config.userId);
 
     // Don't duplicate
     if (this.symbols.has(key)) {
-      this.removeWatch(config.symbol, config.timeframe);
+      this.removeWatch(config.symbol, config.timeframe, config.userId);
     }
 
     // Create EMA calculator for each period
@@ -66,18 +67,21 @@ export class EMAEngine {
   }
 
   /**
-   * Stop watching a symbol
+   * Stop watching a symbol (optionally scoped by userId)
    */
-  removeWatch(symbol: string, timeframe?: string): void {
-    if (timeframe) {
-      const key = this.makeKey(symbol, timeframe);
-      this.symbols.delete(key);
-    } else {
-      // Remove all timeframes for this symbol
+  removeWatch(symbol: string, timeframe?: string, userId?: string): void {
+    const sym = symbol.toUpperCase();
+    if (timeframe && userId) {
+      this.symbols.delete(this.makeKey(symbol, timeframe, userId));
+    } else if (!timeframe && userId) {
       for (const key of this.symbols.keys()) {
-        if (key.startsWith(`${symbol.toUpperCase()}:`)) {
-          this.symbols.delete(key);
-        }
+        if (key.startsWith(`${userId}:${sym}:`)) this.symbols.delete(key);
+      }
+    } else if (timeframe) {
+      this.symbols.delete(this.makeKey(symbol, timeframe));
+    } else {
+      for (const key of this.symbols.keys()) {
+        if (key.endsWith(`:${sym}`) || key.includes(`:${sym}:`)) this.symbols.delete(key);
       }
     }
   }
@@ -86,8 +90,8 @@ export class EMAEngine {
    * Feed historical candles to warm up all EMAs for a symbol.
    * Candles must be sorted by timestamp ascending (oldest first).
    */
-  warmUp(symbol: string, timeframe: string, candles: CandleData[]): void {
-    const key = this.makeKey(symbol, timeframe);
+  warmUp(symbol: string, timeframe: string, candles: CandleData[], userId?: string): void {
+    const key = this.makeKey(symbol, timeframe, userId);
     const state = this.symbols.get(key);
     if (!state) return;
 
@@ -143,8 +147,9 @@ export class EMAEngine {
     price: number,
     currency: string,
     source: string = 'tick',
+    userId?: string,
   ): CrossoverAlert[] {
-    const key = this.makeKey(symbol, timeframe);
+    const key = this.makeKey(symbol, timeframe, userId);
     const state = this.symbols.get(key);
     if (!state) return [];
 
@@ -192,8 +197,8 @@ export class EMAEngine {
   /**
    * Get current EMA values and warmup progress for display on frontend
    */
-  getStatus(symbol: string, timeframe: string): EmaStatus | null {
-    const key = this.makeKey(symbol, timeframe);
+  getStatus(symbol: string, timeframe: string, userId?: string): EmaStatus | null {
+    const key = this.makeKey(symbol, timeframe, userId);
     const state = this.symbols.get(key);
     if (!state) return null;
 
@@ -218,12 +223,13 @@ export class EMAEngine {
   /**
    * Check if a symbol is being watched
    */
-  isWatching(symbol: string, timeframe?: string): boolean {
-    if (timeframe) {
-      return this.symbols.has(this.makeKey(symbol, timeframe));
-    }
+  isWatching(symbol: string, timeframe?: string, userId?: string): boolean {
+    if (timeframe && userId) return this.symbols.has(this.makeKey(symbol, timeframe, userId));
+    if (timeframe) return this.symbols.has(this.makeKey(symbol, timeframe));
+    const sym = symbol.toUpperCase();
     for (const key of this.symbols.keys()) {
-      if (key.startsWith(`${symbol.toUpperCase()}:`)) return true;
+      if (userId && key.startsWith(`${userId}:${sym}:`)) return true;
+      if (!userId && (key.startsWith(`${sym}:`) || key.includes(`:${sym}:`))) return true;
     }
     return false;
   }
@@ -231,8 +237,8 @@ export class EMAEngine {
   /**
    * Get the config for a watched symbol
    */
-  getConfig(symbol: string, timeframe: string): WatchConfig | null {
-    const state = this.symbols.get(this.makeKey(symbol, timeframe));
+  getConfig(symbol: string, timeframe: string, userId?: string): WatchConfig | null {
+    const state = this.symbols.get(this.makeKey(symbol, timeframe, userId));
     return state?.config || null;
   }
 }

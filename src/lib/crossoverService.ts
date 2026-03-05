@@ -32,11 +32,28 @@ try {
   console.log('⚠️  web-push not installed — push notifications disabled');
 }
 
+const REAL_TIME_POLL_MS = 15_000; // Poll 1m every 15s for near real-time alerts
+const MAX_WATCHES_PER_USER = 100; // Max symbols×timeframes one user can monitor (segregates API poll load)
+
+function watchJobKey(config: WatchConfig): string {
+  const sym = config.symbol.toUpperCase();
+  return config.userId ? `${config.userId}:${sym}:${config.timeframe}` : `${sym}:${config.timeframe}`;
+}
+
+function countWatchesForUser(userId: string, cronJobs: Map<string, unknown>, intervalJobs: Map<string, unknown>): number {
+  let n = 0;
+  const prefix = `${userId}:`;
+  for (const key of cronJobs.keys()) if (key.startsWith(prefix)) n++;
+  for (const key of intervalJobs.keys()) if (key.startsWith(prefix)) n++;
+  return n;
+}
+
 export class CrossoverService {
   private engine: EMAEngine;
   private dataSource: UniversalMarketDataSource;
   private io: any; // Socket.IO server instance
   private cronJobs: Map<string, cron.ScheduledTask> = new Map();
+  private intervalJobs: Map<string, NodeJS.Timeout> = new Map(); // 1m real-time polling
   private pushSubscriptions: Map<string, PushSubscriptionData> = new Map();
   private initialized = false;
 
@@ -54,19 +71,30 @@ export class CrossoverService {
   }
 
   /**
-   * Start monitoring a symbol for EMA crossovers
+   * Start monitoring a symbol for EMA crossovers (per-user when config.userId is set)
    */
   async startMonitoring(config: WatchConfig): Promise<{ success: boolean; message: string }> {
-    const key = `${config.symbol.toUpperCase()}:${config.timeframe}`;
+    const key = watchJobKey(config);
 
     // Validate
     if (!config.symbol || config.emaPeriods.length < 2) {
       return { success: false, message: 'Need a symbol and at least 2 EMA periods' };
     }
 
+    // Per-user limit to segregate API poll load
+    if (config.userId) {
+      const count = countWatchesForUser(config.userId, this.cronJobs, this.intervalJobs);
+      if (count >= MAX_WATCHES_PER_USER) {
+        return {
+          success: false,
+          message: `Limit reached: max ${MAX_WATCHES_PER_USER} symbols per account. Stop one to add another.`,
+        };
+      }
+    }
+
     // Stop existing monitoring for this key
-    if (this.cronJobs.has(key)) {
-      await this.stopMonitoring(config.symbol, config.timeframe);
+    if (this.cronJobs.has(key) || this.intervalJobs.has(key)) {
+      await this.stopMonitoring(config.symbol, config.timeframe, config.userId);
     }
 
     // Emit status
@@ -82,57 +110,84 @@ export class CrossoverService {
       const priceData = await this.dataSource.fetchTimeframeData(config.symbol, config.timeframe);
 
       if (priceData?.candleData && priceData.candleData.length > 0) {
-        this.engine.warmUp(config.symbol, config.timeframe, priceData.candleData);
+        this.engine.warmUp(config.symbol, config.timeframe, priceData.candleData, config.userId);
 
         // Emit initial price and EMA data
-        this.emitPriceUpdate(config.symbol, priceData);
-        this.emitEmaUpdate(config.symbol, config.timeframe);
+        this.emitPriceUpdate(config.symbol, config.timeframe, priceData);
+        this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
       } else {
         console.warn(`⚠️  No historical data for warmup of ${config.symbol}`);
         this.emitStatus(config.symbol, config.timeframe, 'running', 'Running without historical warmup — EMAs will initialize from live ticks');
+        if (priceData) this.emitPriceUpdate(config.symbol, config.timeframe, priceData);
+        this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
       }
     } catch (error: any) {
       console.error(`❌ Warmup error for ${config.symbol}:`, error?.message || error);
+      this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
     }
 
-    // 3. Set up cron job for periodic polling
-    const cronExpr = this.getCronExpression(config.timeframe);
-    console.log(`⏰ Scheduling ${config.symbol} (${config.timeframe}) with cron: ${cronExpr}`);
+    // 3. Set up polling: 1m uses 30s interval for real-time alerts; others use cron
+    if (config.timeframe === '1m') {
+      console.log(`⏰ Real-time polling ${config.symbol} (1m) every ${REAL_TIME_POLL_MS / 1000}s${config.userId ? ` [user]` : ''}`);
+      const intervalId = setInterval(() => {
+        this.pollAndProcess(config).catch((err) =>
+          console.error(`Poll error for ${config.symbol}:`, err)
+        );
+      }, REAL_TIME_POLL_MS);
+      this.intervalJobs.set(key, intervalId);
+    } else {
+      const cronExpr = this.getCronExpression(config.timeframe);
+      console.log(`⏰ Scheduling ${config.symbol} (${config.timeframe}) with cron: ${cronExpr}${config.userId ? ` [user]` : ''}`);
+      const job = cron.schedule(cronExpr, () => {
+        this.pollAndProcess(config).catch((err) =>
+          console.error(`Poll error for ${config.symbol}:`, err)
+        );
+      });
+      this.cronJobs.set(key, job);
+    }
 
-    const job = cron.schedule(cronExpr, () => {
-      this.pollAndProcess(config).catch((err) =>
-        console.error(`Poll error for ${config.symbol}:`, err)
-      );
-    });
-    this.cronJobs.set(key, job);
+    // 4. Run first poll immediately so data refreshes right away
+    this.pollAndProcess(config).catch((err) =>
+      console.error(`Initial poll error for ${config.symbol}:`, err)
+    );
 
     this.emitStatus(config.symbol, config.timeframe, 'running', 'Monitoring active');
     return { success: true, message: `Monitoring started for ${config.symbol} (${config.timeframe})` };
   }
 
   /**
-   * Stop monitoring a symbol
+   * Stop monitoring a symbol (optionally scoped by userId)
    */
-  async stopMonitoring(symbol: string, timeframe?: string): Promise<void> {
+  async stopMonitoring(symbol: string, timeframe?: string, userId?: string): Promise<void> {
     const upperSymbol = symbol.toUpperCase();
 
+    const matchKey = (k: string) => {
+      if (userId) return k === `${userId}:${upperSymbol}:${timeframe}` || (timeframe && k.startsWith(`${userId}:${upperSymbol}:`)) || (!timeframe && k.startsWith(`${userId}:${upperSymbol}:`));
+      return k === `${upperSymbol}:${timeframe}` || (timeframe && k.endsWith(`:${upperSymbol}:${timeframe}`)) || (!timeframe && k.includes(`:${upperSymbol}:`));
+    };
+
     for (const [key, job] of this.cronJobs) {
-      if (timeframe) {
-        if (key === `${upperSymbol}:${timeframe}`) {
-          job.stop();
-          this.cronJobs.delete(key);
-        }
+      if (userId) {
+        if (timeframe && key === `${userId}:${upperSymbol}:${timeframe}`) { job.stop(); this.cronJobs.delete(key); }
+        else if (!timeframe && key.startsWith(`${userId}:${upperSymbol}:`)) { job.stop(); this.cronJobs.delete(key); }
       } else {
-        if (key.startsWith(`${upperSymbol}:`)) {
-          job.stop();
-          this.cronJobs.delete(key);
-        }
+        if (timeframe && key === `${upperSymbol}:${timeframe}`) { job.stop(); this.cronJobs.delete(key); }
+        else if (!timeframe && key.startsWith(`${upperSymbol}:`)) { job.stop(); this.cronJobs.delete(key); }
+      }
+    }
+    for (const [key, intervalId] of this.intervalJobs) {
+      if (userId) {
+        if (timeframe && key === `${userId}:${upperSymbol}:${timeframe}`) { clearInterval(intervalId); this.intervalJobs.delete(key); }
+        else if (!timeframe && key.startsWith(`${userId}:${upperSymbol}:`)) { clearInterval(intervalId); this.intervalJobs.delete(key); }
+      } else {
+        if (timeframe && key === `${upperSymbol}:${timeframe}`) { clearInterval(intervalId); this.intervalJobs.delete(key); }
+        else if (!timeframe && key.startsWith(`${upperSymbol}:`)) { clearInterval(intervalId); this.intervalJobs.delete(key); }
       }
     }
 
-    this.engine.removeWatch(symbol, timeframe);
+    this.engine.removeWatch(symbol, timeframe, userId);
     this.emitStatus(symbol, timeframe || '', 'stopped', 'Monitoring stopped');
-    console.log(`🛑 Stopped monitoring ${symbol}${timeframe ? ` (${timeframe})` : ''}`);
+    console.log(`🛑 Stopped monitoring ${symbol}${timeframe ? ` (${timeframe})` : ''}${userId ? ' [user]' : ''}`);
   }
 
   /**
@@ -144,7 +199,7 @@ export class CrossoverService {
       if (!priceData) return;
 
       // Emit price update
-      this.emitPriceUpdate(config.symbol, priceData);
+      this.emitPriceUpdate(config.symbol, config.timeframe, priceData);
 
       // Process through EMA engine
       const alerts = this.engine.processTick(
@@ -153,10 +208,11 @@ export class CrossoverService {
         priceData.price,
         priceData.currency,
         priceData.source,
+        config.userId,
       );
 
       // Emit EMA update
-      this.emitEmaUpdate(config.symbol, config.timeframe);
+      this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
 
       // Handle crossover alerts
       this.handleAlerts(alerts);
@@ -179,9 +235,10 @@ export class CrossoverService {
   /**
    * Emit price update via Socket.IO
    */
-  private emitPriceUpdate(symbol: string, priceData: any): void {
+  private emitPriceUpdate(symbol: string, timeframe: string, priceData: any): void {
     this.io?.emit('price:update', {
       symbol,
+      timeframe,
       price: priceData.price,
       change: priceData.change || 0,
       changePercent: priceData.changePercent || 0,
@@ -194,8 +251,8 @@ export class CrossoverService {
   /**
    * Emit EMA status update via Socket.IO
    */
-  private emitEmaUpdate(symbol: string, timeframe: string): void {
-    const status = this.engine.getStatus(symbol, timeframe);
+  private emitEmaUpdate(symbol: string, timeframe: string, userId?: string): void {
+    const status = this.engine.getStatus(symbol, timeframe, userId);
     if (status) {
       this.io?.emit('ema:update', {
         symbol,

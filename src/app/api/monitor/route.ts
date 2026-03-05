@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { auth } from '@clerk/nextjs/server';
 import { CrossoverService } from '@/lib/crossoverService';
 import { WatchConfig } from '@/lib/types';
 
@@ -14,9 +15,14 @@ function getOrCreateService(): CrossoverService {
   return service;
 }
 
-// POST: Start monitoring a symbol
+// POST: Start monitoring a symbol (requires auth; segregates polls per user)
 export async function POST(req: NextRequest) {
   try {
+    const { userId } = await auth();
+    if (!userId) {
+      return NextResponse.json({ success: false, error: 'Sign in required' }, { status: 401 });
+    }
+
     const body = await req.json();
     const { symbol, timeframe, emaPeriods, trackBullish, trackBearish, exchange, currency } = body;
 
@@ -28,6 +34,7 @@ export async function POST(req: NextRequest) {
     }
 
     const config: WatchConfig = {
+      userId,
       symbol: symbol.toUpperCase(),
       timeframe,
       emaPeriods: emaPeriods.map(Number),
@@ -50,9 +57,14 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// DELETE: Stop monitoring a symbol
+// DELETE: Stop monitoring a symbol (requires auth; scoped to user)
 export async function DELETE(req: NextRequest) {
   try {
+    const { userId } = await auth();
+    if (!userId) {
+      return NextResponse.json({ success: false, error: 'Sign in required' }, { status: 401 });
+    }
+
     const body = await req.json();
     const { symbol, timeframe } = body;
 
@@ -64,7 +76,7 @@ export async function DELETE(req: NextRequest) {
     }
 
     const svc = getOrCreateService();
-    await svc.stopMonitoring(symbol, timeframe);
+    await svc.stopMonitoring(symbol, timeframe, userId);
 
     return NextResponse.json({
       success: true,

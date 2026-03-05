@@ -1,38 +1,39 @@
 // ============================================
-// Market Data Source — Dhan HQ only
+// Market Data Source — Angel One only
 // ============================================
 
 import { PriceData, SearchResult } from './types';
-import { DhanDataSource, getDhanSource } from './dhanSource';
+import { AngelOneDataSource, getAngelOneSource } from './angelOneSource';
 
 export class UniversalMarketDataSource {
-  private dhanSource: DhanDataSource;
+  private angelSource: AngelOneDataSource;
 
   constructor(
     _alphaVantageApiKey?: string,
     _finnhubApiKey?: string,
     _breezeSource?: unknown,
-    dhanSource?: DhanDataSource,
+    _dhanSource?: unknown,
+    angelSource?: AngelOneDataSource,
   ) {
-    this.dhanSource = dhanSource || getDhanSource();
+    this.angelSource = angelSource || getAngelOneSource();
   }
 
   async fetchTimeframeData(symbol: string, timeframe: string): Promise<PriceData | null> {
     try {
-      console.log(`🔍 Fetching ${symbol} (${timeframe}) via Dhan`);
+      console.log(`🔍 Fetching ${symbol} (${timeframe}) via Angel One`);
 
-      if (!this.dhanSource.isAvailable()) {
-        console.error('❌ Dhan credentials not configured');
+      if (!this.angelSource.isAvailable()) {
+        console.error('❌ Angel One credentials not configured');
         return null;
       }
 
-      const data = await this.dhanSource.fetchTimeframeData(symbol, timeframe);
+      const data = await this.angelSource.fetchTimeframeData(symbol, timeframe);
       if (data) {
-        console.log(`✅ Dhan: ${symbol} = ${data.price}`);
+        console.log(`✅ Angel One: ${symbol} = ${data.price}`);
         return data;
       }
 
-      console.error(`❌ Dhan returned no data for ${symbol}`);
+      console.error(`❌ Angel One returned no data for ${symbol}`);
       return null;
     } catch (error) {
       console.error(`❌ Error fetching ${symbol}:`, error);
@@ -42,7 +43,8 @@ export class UniversalMarketDataSource {
 
   async searchSymbols(query: string): Promise<SearchResult[]> {
     try {
-      return await this.dhanSource.searchSymbols(query);
+      if (!this.angelSource.isAvailable()) return [];
+      return await this.angelSource.searchSymbols(query);
     } catch (error) {
       console.error('Symbol search error:', error);
       return [];
@@ -50,6 +52,6 @@ export class UniversalMarketDataSource {
   }
 
   getAvailableSources(): string[] {
-    return this.dhanSource.isAvailable() ? ['Dhan HQ'] : [];
+    return this.angelSource.isAvailable() ? ['Angel One'] : [];
   }
 }
