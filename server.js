@@ -37,7 +37,8 @@ app.prepare().then(async () => {
   server.use((req, res) => handle(req, res));
 
   const PORT = process.env.PORT || 3000;
-  httpServer.listen(PORT, (err) => {
+  const HOST = process.env.HOST || '0.0.0.0';
+  httpServer.listen(PORT, HOST, (err) => {
     if (err) throw err;
     console.log(`\n🚀 SignalStack ready on http://localhost:${PORT}`);
     console.log(`📡 WebSocket server running`);

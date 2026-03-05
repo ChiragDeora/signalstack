@@ -1,0 +1,8 @@
+# Pin build and start so the custom Node server (Socket.IO + Next.js) runs on Railway.
+# Railway routes traffic to PORT (e.g. 8080); server.js uses process.env.PORT.
+
+[build]
+buildCommand = "npm run build"
+
+[deploy]
+startCommand = "npm run start"

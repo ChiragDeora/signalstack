@@ -137,6 +137,7 @@ export default function EMAAlertSystem() {
   const [trackBearish, setTrackBearish] = useState(true);
   const [alerts, setAlerts] = useState<AlertData[]>([]);
   const [pushEnabled, setPushEnabled] = useState(false);
+  const [pushAvailable, setPushAvailable] = useState<boolean | null>(null);
   const [mounted, setMounted] = useState(false);
   const [isFetchingPrice, setIsFetchingPrice] = useState(false);
   const [editingPairIndex, setEditingPairIndex] = useState<number | null>(null);
@@ -163,6 +164,14 @@ export default function EMAAlertSystem() {
   );
 
   useEffect(() => { setMounted(true); }, []);
+
+  // Check if push is configured on this deployment (e.g. Vercel returns 503 without VAPID env)
+  useEffect(() => {
+    if (!mounted) return;
+    axios.get<{ vapidConfigured?: boolean }>('/api/status')
+      .then((res) => setPushAvailable(!!res.data?.vapidConfigured))
+      .catch(() => setPushAvailable(false));
+  }, [mounted]);
 
   // Restore persisted config once on mount (client-only)
   useEffect(() => {
@@ -257,10 +266,25 @@ export default function EMAAlertSystem() {
   }, [flushSocketUpdates]);
 
   useEffect(() => {
-    const socket = io(window.location.origin, { transports: ['websocket', 'polling'] });
+    const origin = typeof window !== 'undefined' ? window.location.origin : '';
+    const socket = io(origin, {
+      path: '/socket.io',
+      transports: ['polling', 'websocket'],
+      reconnection: true,
+      reconnectionAttempts: 10,
+      reconnectionDelay: 1000,
+      timeout: 20000,
+    });
     socketRef.current = socket;
     socket.on('connect', () => setConnected(true));
-    socket.on('disconnect', () => setConnected(false));
+    socket.on('disconnect', (reason) => {
+      setConnected(false);
+      if (reason === 'io server disconnect') socket.connect();
+    });
+    socket.on('connect_error', (err) => {
+      setConnected(false);
+      console.warn('Socket connect_error:', err.message);
+    });
     socket.on('price:update', (data: any) => {
       const sym = data.symbol;
       if (!sym) return;
@@ -319,6 +343,34 @@ export default function EMAAlertSystem() {
       socket.disconnect();
     };
   }, [scheduleFlush, flushSocketUpdates]);
+
+  // Poll EMA status when monitoring and socket may not deliver (e.g. mobile, deploy without persistent WS)
+  useEffect(() => {
+    const symbol = displaySymbol;
+    const timeframe = displayTimeframe;
+    if (!symbol || !monitoredSymbols.has(symbol)) return;
+
+    const key = watchKey(symbol, timeframe);
+    const poll = async () => {
+      try {
+        const { data } = await axios.get<{ emas: Record<number, number | null>; warmupProgress: Record<number, number> }>(
+          `/api/ema-status?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`
+        );
+        if (data?.emas && Object.keys(data.emas).length > 0) {
+          setEmaByKey((prev) => ({ ...prev, [key]: { ...prev[key], ...data.emas } }));
+        }
+        if (data?.warmupProgress && Object.keys(data.warmupProgress).length > 0) {
+          setWarmupByKey((prev) => ({ ...prev, [key]: { ...prev[key], ...data.warmupProgress } }));
+        }
+      } catch {
+        // ignore (e.g. serverless or no server)
+      }
+    };
+
+    poll();
+    const interval = setInterval(poll, 5000);
+    return () => clearInterval(interval);
+  }, [displaySymbol, displayTimeframe, monitoredSymbols]);
 
   useEffect(() => {
     if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
@@ -702,17 +754,27 @@ export default function EMAAlertSystem() {
             </div>
           </div>
           <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
-            <div className={`flex items-center gap-1 sm:gap-1.5 text-xs font-semibold px-2.5 py-2 sm:px-3 rounded-lg border min-h-[44px] ${connected ? 'border-emerald-500/30 text-emerald-400' : 'border-red-500/30 text-red-400'
-              }`} style={{ background: connected ? 'var(--green-bg)' : 'var(--red-bg)' }}>
+            <div
+              className={`flex items-center gap-1 sm:gap-1.5 text-xs font-semibold px-2.5 py-2 sm:px-3 rounded-lg border min-h-[44px] ${connected ? 'border-emerald-500/30 text-emerald-400' : 'border-red-500/30 text-red-400'
+                }`}
+              style={{ background: connected ? 'var(--green-bg)' : 'var(--red-bg)' }}
+              title={connected ? 'Real-time updates connected' : 'Not connected. Use the deployment where the Node server runs (e.g. Railway URL) for Live updates.'}
+            >
               <span className={`w-2 h-2 rounded-full flex-shrink-0 ${connected ? 'bg-emerald-400 anim-live' : 'bg-red-400'}`} />
               {connected ? <Wifi className="w-3.5 h-3.5 flex-shrink-0" /> : <WifiOff className="w-3.5 h-3.5 flex-shrink-0" />}
               <span>{connected ? 'Live' : 'Offline'}</span>
             </div>
-            {mounted && !pushEnabled && 'serviceWorker' in navigator && (
-              <button onClick={enablePush} className="tf-btn flex items-center gap-1.5 !text-xs">
-                <Bell className="w-3.5 h-3.5" />
-                <span>Push</span>
-              </button>
+            {mounted && 'serviceWorker' in navigator && (
+              pushAvailable === false ? (
+                <span className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-amber-500/30 text-amber-400/90" title="Add VAPID env vars in production to enable push notifications">
+                  Push unavailable
+                </span>
+              ) : !pushEnabled ? (
+                <button onClick={enablePush} className="tf-btn flex items-center gap-1.5 !text-xs">
+                  <Bell className="w-3.5 h-3.5" />
+                  <span>Push</span>
+                </button>
+              ) : null
             )}
             <div className="flex items-center">
               <UserButton

@@ -339,8 +339,8 @@ export class CrossoverService {
     };
   }
 
-  getEmaStatus(symbol: string, timeframe: string) {
-    return this.engine.getStatus(symbol, timeframe);
+  getEmaStatus(symbol: string, timeframe: string, userId?: string) {
+    return this.engine.getStatus(symbol, timeframe, userId);
   }
 
   isWatching(symbol: string, timeframe?: string): boolean {

@@ -8,7 +8,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-const DEFAULT_SUBJECT = 'mailto:support@signalstack.local';
+const DEFAULT_SUBJECT = 'mailto:chiragdeora984@gmail.com';
 const VAPID_KEYS_FILE = '.vapid-keys.json';
 
 export interface VapidKeys {
@@ -23,7 +23,13 @@ function keysFilePath(): string {
   return path.join(process.cwd(), VAPID_KEYS_FILE);
 }
 
+/** Vercel/serverless has read-only fs; skip file read/write and auto-generate there. */
+function isReadOnlyFs(): boolean {
+  return !!process.env.VERCEL;
+}
+
 function loadFromFile(): VapidKeys | null {
+  if (isReadOnlyFs()) return null;
   try {
     const raw = fs.readFileSync(keysFilePath(), 'utf-8');
     const data = JSON.parse(raw) as { publicKey?: string; privateKey?: string; subject?: string };
@@ -41,6 +47,7 @@ function loadFromFile(): VapidKeys | null {
 }
 
 function generateAndPersist(): VapidKeys | null {
+  if (isReadOnlyFs()) return null;
   try {
     const webpush = require('web-push');
     const { publicKey, privateKey } = webpush.generateVAPIDKeys();
