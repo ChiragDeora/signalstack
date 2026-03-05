@@ -1,0 +1,19 @@
+{
+  "name": "SignalStack",
+  "short_name": "SignalStack",
+  "description": "Real-Time Multi-EMA Crossover Detection & Notifications",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#111827",
+  "theme_color": "#2563eb",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/signalstack-logo.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "categories": ["finance", "utilities"]
+}
