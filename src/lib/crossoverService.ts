@@ -13,6 +13,12 @@ import {
   WatchConfig, CrossoverAlert, PriceUpdate, EmaUpdate,
   MonitorStatus, PushSubscriptionData, TIMEFRAMES,
 } from './types';
+import {
+  sendCrossoverAlertEmail,
+  isBrevoConfigured,
+  getAlertRecipientEmails,
+} from './brevoEmail';
+import { getClerkUserEmail } from './clerkUserEmail';
 
 // web-push is optional — only needed for push notifications (see OpenReplay Web Push guide)
 let webpush: any = null;
@@ -213,21 +219,26 @@ export class CrossoverService {
       // Emit EMA update
       this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
 
-      // Handle crossover alerts
-      this.handleAlerts(alerts);
+      // Handle crossover alerts (pass userId so we can email the signed-in user)
+      this.handleAlerts(alerts, config.userId);
     } catch (error) {
       console.error(`❌ Poll error for ${config.symbol}:`, error);
     }
   }
 
   /**
-   * Handle detected crossover alerts
+   * Handle detected crossover alerts. When userId is set, fetches that user's email from Clerk and sends the alert there too.
    */
-  private handleAlerts(alerts: CrossoverAlert[]): void {
+  private handleAlerts(alerts: CrossoverAlert[], userId?: string): void {
+    const userEmailPromise =
+      userId && alerts.length > 0 ? getClerkUserEmail(userId) : Promise.resolve(null);
     for (const alert of alerts) {
       addAlert(alert);
       this.io?.emit('alert:crossover', alert);
       this.sendPushNotification(alert);
+      userEmailPromise.then((email) => sendCrossoverAlertEmail(alert, email)).catch((e) =>
+        console.warn('Crossover email alert failed:', e),
+      );
     }
   }
 
@@ -329,12 +340,14 @@ export class CrossoverService {
     watchedSymbols: string[];
     alertCount: number;
     pushSubscriptionCount: number;
+    emailAlertsConfigured: boolean;
     availableSources: string[];
   } {
     return {
       watchedSymbols: this.engine.getWatchedSymbols(),
       alertCount: getAlerts().length,
       pushSubscriptionCount: this.pushSubscriptions.size,
+      emailAlertsConfigured: isBrevoConfigured() && getAlertRecipientEmails().length > 0,
       availableSources: this.dataSource.getAvailableSources(),
     };
   }

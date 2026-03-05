@@ -35,6 +35,7 @@ To get **real-time EMA data, crossover alerts, and push notifications**, deploy 
      - Clerk: `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, `CLERK_SECRET_KEY`, and Clerk redirect URLs pointing to your Railway URL (e.g. `https://your-app.up.railway.app`)
      - Angel One (or your data source): e.g. `ANGEL_ONE_API_KEY`, etc.
      - Optional push: `NEXT_PUBLIC_VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_SUBJECT`
+     - Optional email (Brevo SMTP): `BREVO_SMTP_USER`, `BREVO_SMTP_PASS` (and optionally `BREVO_ALERT_TO` = comma-separated emails for crossover alerts, `BREVO_FROM_EMAIL` for From address)
    - Railway sets `PORT` for you; your app already uses `process.env.PORT || 3000`.
 
 5. **Deploy**
@@ -53,6 +54,11 @@ To get **real-time EMA data, crossover alerts, and push notifications**, deploy 
 
 8. **PWA on Railway**
    - **Yes, PWA works on Railway.** The app is served over HTTPS (Railway provides it), and the manifest (`/manifest.json`) and service worker (`/sw.js`) are served from the same origin. No extra config needed. Install to home screen from the Railway URL and push/offline behaviour will work once the app is live.
+
+9. **Brevo email (SMTP relay + notifications)**
+   - Set **BREVO_SMTP_USER** (Brevo SMTP login email) and **BREVO_SMTP_PASS** (SMTP key from Brevo → SMTP & API). Optional: **BREVO_SMTP_HOST** (default `smtp-relay.brevo.com`), **BREVO_SMTP_PORT** (default `587`), **BREVO_FROM_EMAIL** (From address).
+   - **Crossover alerts by email:** When a signed-in user is monitoring a symbol and a crossover fires, the alert is sent to **that user’s Clerk email** (no extra config). Optionally set **BREVO_ALERT_TO** (comma-separated emails) to also send every alert to those addresses (e.g. admins).
+   - **Relay (send custom emails):** Signed-in users can POST to `/api/send-email` with `{ to, subject, text?, html? }` to send email via Brevo. Use this for contact forms or any app-triggered email.
 
 ---
 
@@ -119,5 +125,6 @@ To get **real-time EMA data, crossover alerts, and push notifications**, deploy 
 | Cron/interval (monitoring) | ❌ | ✅ |
 | EMA warmup + live updates | ❌ | ✅ |
 | Push (with VAPID env vars) | ✅ if env set | ✅ |
+| Email alerts (Brevo SMTP) | ❌ | ✅ if BREVO_* set |
 
 **Summary:** For real-time monitoring and no more stuck "Warming up EMA data...", deploy to **Railway**, **Render**, or a **VPS** and use **`npm run start`** so `node server.js` runs. Use that app URL (not Vercel) on your father’s phone.

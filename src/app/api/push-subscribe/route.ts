@@ -1,5 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { auth } from '@clerk/nextjs/server';
 import { CrossoverService } from '@/lib/crossoverService';
+import { getClerkUserEmail } from '@/lib/clerkUserEmail';
+import { sendEmail, isBrevoConfigured } from '@/lib/brevoEmail';
 
 let service: CrossoverService | null = null;
 
@@ -33,8 +36,25 @@ export async function POST(req: NextRequest) {
       },
     });
 
+    // Send a one-time test email so the user can confirm push/notifications are working
+    const { userId } = await auth();
+    if (userId && isBrevoConfigured()) {
+      getClerkUserEmail(userId).then((email) => {
+        if (!email) return;
+        sendEmail({
+          to: email,
+          subject: 'Push notifications enabled – SignalStack',
+          text:
+            "You're all set. Push notifications are now enabled. You'll receive crossover alerts here and by email when they occur.",
+          html:
+            "<p>You're all set. <strong>Push notifications are now enabled.</strong></p>" +
+            "<p>You'll receive crossover alerts via push and email when they occur.</p>",
+        }).catch((e) => console.warn('Test email on push enable failed:', e));
+      });
+    }
+
     return NextResponse.json({ success: true, message: 'Push subscription added' });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('❌ Push subscribe error:', error);
     return NextResponse.json(
       { success: false, error: 'Failed to subscribe' },
