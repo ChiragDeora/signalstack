@@ -156,8 +156,11 @@ export default function EMAAlertSystem() {
   const displayPrice = displaySymbol ? priceByKey[watchKey(displaySymbol, displayTimeframe)] : null;
   const displayEmaValues = displaySymbol ? emaByKey[watchKey(displaySymbol, displayTimeframe)] ?? {} : {};
   const displayWarmupProgress = displaySymbol ? warmupByKey[watchKey(displaySymbol, displayTimeframe)] ?? {} : {};
-  const currency = displaySymbol ? (symbols.find((s) => s.symbol === displaySymbol)?.currency ?? 'INR') : 'INR';
-  const emas = displaySymbol ? (emasBySymbol[displaySymbol] ?? []) : [];
+  const _currency = displaySymbol ? (symbols.find((s) => s.symbol === displaySymbol)?.currency ?? 'INR') : 'INR';
+  const emas = useMemo(
+    () => (displaySymbol ? (emasBySymbol[displaySymbol] ?? []) : []),
+    [displaySymbol, emasBySymbol]
+  );
 
   useEffect(() => { setMounted(true); }, []);
 
@@ -445,7 +448,7 @@ export default function EMAAlertSystem() {
   const symbolKeys = symbols.map((s) => s.symbol).join(',');
   const timeframeFetchKey = useMemo(
     () => symbols.map((s) => `${s.symbol}:${timeframeBySymbol[s.symbol] ?? DEFAULT_TIMEFRAME}`).sort().join(','),
-    [symbols, symbolKeys, timeframeBySymbol]
+    [symbols, timeframeBySymbol]
   );
   const symbolsRef = useRef<MonitoredSymbol[]>(symbols);
   symbolsRef.current = symbols;
@@ -529,7 +532,7 @@ export default function EMAAlertSystem() {
     }
   };
 
-  const startMonitoring = async () => {
+  const _startMonitoring = async () => {
     if (symbols.length === 0) {
       alert('Add at least one symbol');
       return;
@@ -598,7 +601,7 @@ export default function EMAAlertSystem() {
     } catch { /* ignore */ }
   };
 
-  const resetAll = () => {
+  const _resetAll = () => {
     setMonitoredSymbols(new Set());
     setMonitorStatus('');
     setSymbols([]);
@@ -642,16 +645,35 @@ export default function EMAAlertSystem() {
     resetConfigKeepSymbols();
   };
 
+  /** Decode base64url VAPID public key for PushManager (see OpenReplay Web Push guide) */
+  const urlBase64ToUint8Array = (base64String: string): Uint8Array => {
+    const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const rawData = atob(base64);
+    const outputArray = new Uint8Array(rawData.length);
+    for (let i = 0; i < rawData.length; ++i) outputArray[i] = rawData.charCodeAt(i);
+    return outputArray;
+  };
+
   const enablePush = async () => {
     try {
-      if (!('serviceWorker' in navigator)) return;
+      if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+      // Request permission on user gesture (required by browsers)
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') return;
       const registration = await navigator.serviceWorker.ready;
-      const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
-      if (!vapidKey) return;
-      const subscription = await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: vapidKey });
+      const { data } = await axios.get<{ publicKey: string }>('/api/push-public-key');
+      if (!data?.publicKey) return;
+      const applicationServerKey = urlBase64ToUint8Array(data.publicKey);
+      const subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: applicationServerKey as BufferSource,
+      });
       await axios.post('/api/push-subscribe', subscription.toJSON());
       setPushEnabled(true);
-    } catch (err) { console.error('Push subscription failed:', err); }
+    } catch (err) {
+      console.error('Push subscription failed:', err);
+    }
   };
 
   const crossoverPairs = useMemo((): [EMA, EMA][] => {
@@ -752,13 +774,13 @@ export default function EMAAlertSystem() {
               onBlur={() => { setTimeout(() => setShowSearch(false), 180); }}
               className="input-field !py-3 text-base font-semibold pr-10 w-full"
               placeholder="Search symbols (e.g. RELIANCE)"
-              aria-expanded={showSearch && searchResults.length > 0}
-              aria-haspopup="listbox"
+              aria-autocomplete="list"
+              aria-controls={showSearch && searchResults.length > 0 ? 'search-results-listbox' : undefined}
             />
             <Search className={`absolute right-4 top-1/2 -translate-y-1/2 w-5 h-5 pointer-events-none ${isSearching ? 'animate-spin' : ''}`} style={{ color: 'var(--text-muted)' }} />
 
             {showSearch && searchResults.length > 0 && (
-              <div className="absolute top-full left-0 right-0 mt-2 search-drop max-h-64 overflow-y-auto z-50 rounded-xl shadow-xl" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }} role="listbox">
+              <div id="search-results-listbox" className="absolute top-full left-0 right-0 mt-2 search-drop max-h-64 overflow-y-auto z-50 rounded-xl shadow-xl" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }} role="listbox">
                 {searchResults.map((r, i) => (
                   <button
                     key={`${r.symbol}-${r.exchange || ''}-${i}`}
@@ -768,6 +790,7 @@ export default function EMAAlertSystem() {
                     className="w-full px-4 py-3 text-left transition-colors first:rounded-t-xl last:rounded-b-xl hover:bg-white/5"
                     style={{ borderBottom: '1px solid var(--border-subtle)' }}
                     role="option"
+                    aria-selected={false}
                   >
                     <div className="flex justify-between items-center">
                       <div>

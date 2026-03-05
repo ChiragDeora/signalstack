@@ -540,7 +540,7 @@ export class DhanDataSource {
     const results: SearchResult[] = [];
     const seen = new Set<string>();
 
-    for (const [key, entry] of map) {
+    for (const [_key, entry] of map) {
       if (!entry.tradingSymbol.startsWith(upperQuery)) continue;
       if (seen.has(entry.tradingSymbol)) continue;
       seen.add(entry.tradingSymbol);

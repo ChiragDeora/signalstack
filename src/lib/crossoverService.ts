@@ -14,15 +14,14 @@ import {
   MonitorStatus, PushSubscriptionData, TIMEFRAMES,
 } from './types';
 
-// web-push is optional — only needed for push notifications
+// web-push is optional — only needed for push notifications (see OpenReplay Web Push guide)
 let webpush: any = null;
 try {
   webpush = require('web-push');
-  const vapidPublic = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
-  const vapidPrivate = process.env.VAPID_PRIVATE_KEY;
-  const vapidSubject = process.env.VAPID_SUBJECT;
-  if (vapidPublic && vapidPrivate && vapidSubject) {
-    webpush.setVapidDetails(vapidSubject, vapidPublic, vapidPrivate);
+  const { getVapidKeys } = require('./pushKeys');
+  const keys = getVapidKeys();
+  if (keys) {
+    webpush.setVapidDetails(keys.subject, keys.publicKey, keys.privateKey);
     console.log('✅ Web Push VAPID configured');
   } else {
     console.log('⚠️  Web Push VAPID keys not set — push notifications disabled');
@@ -161,7 +160,7 @@ export class CrossoverService {
   async stopMonitoring(symbol: string, timeframe?: string, userId?: string): Promise<void> {
     const upperSymbol = symbol.toUpperCase();
 
-    const matchKey = (k: string) => {
+    const _matchKey = (k: string) => {
       if (userId) return k === `${userId}:${upperSymbol}:${timeframe}` || (timeframe && k.startsWith(`${userId}:${upperSymbol}:`)) || (!timeframe && k.startsWith(`${userId}:${upperSymbol}:`));
       return k === `${upperSymbol}:${timeframe}` || (timeframe && k.endsWith(`:${upperSymbol}:${timeframe}`)) || (!timeframe && k.includes(`:${upperSymbol}:`));
     };
@@ -307,9 +306,10 @@ export class CrossoverService {
       url: '/',
     });
 
+    const options = { TTL: 86400, urgency: 'high' as const };
     const promises = [...this.pushSubscriptions.entries()].map(async ([endpoint, sub]) => {
       try {
-        await webpush.sendNotification(sub, payload);
+        await webpush.sendNotification(sub, payload, options);
       } catch (err: any) {
         if (err.statusCode === 410 || err.statusCode === 404) {
           this.pushSubscriptions.delete(endpoint);

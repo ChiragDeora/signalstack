@@ -59,7 +59,7 @@ export async function DELETE(req: NextRequest) {
     svc.removePushSubscription(endpoint);
 
     return NextResponse.json({ success: true, message: 'Push subscription removed' });
-  } catch (_err) {
+  } catch {
     return NextResponse.json(
       { success: false, error: 'Failed to unsubscribe' },
       { status: 500 },

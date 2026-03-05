@@ -43,5 +43,8 @@ next-env.d.ts
 # Dhan scrip master disk cache
 .scrip-cache.json
 
+# Auto-generated VAPID keys (optional; can use env vars instead)
+.vapid-keys.json
+
 # clerk configuration (can include secrets)
 /.clerk/

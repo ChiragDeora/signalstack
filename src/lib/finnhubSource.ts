@@ -142,7 +142,7 @@ export class FinnhubDataSource {
           change = currentPrice - quoteResponse.data.pc;
           changePercent = (change / quoteResponse.data.pc) * 100;
         }
-      } catch (quoteError) {
+      } catch {
         console.warn(`⚠️ Quote fetch failed for ${symbol}, will use candle data`);
       }
       
@@ -248,7 +248,6 @@ export class FinnhubDataSource {
   }
 
   private calculateStartTime(endTime: number, timeframe: string): number {
-    const now = new Date(endTime * 1000);
     const timeframes: { [key: string]: number } = {
       '1m': 60,
       '5m': 5 * 60,
@@ -371,7 +370,7 @@ export class FinnhubDataSource {
               type: 'Stock'
             });
           }
-        } catch (profileError) {
+        } catch {
           console.warn(`⚠️ Company profile fetch failed for ${query}`);
         }
       }
