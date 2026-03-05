@@ -53,12 +53,10 @@ app.prepare().then(async () => {
 
   // Graceful shutdown
   process.on('SIGTERM', () => {
-    console.log('SIGTERM received, shutting down...');
     httpServer.close(() => process.exit(0));
   });
 
   process.on('SIGINT', () => {
-    console.log('\nSIGINT received, shutting down...');
     httpServer.close(() => process.exit(0));
   });
 });

@@ -4,7 +4,7 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import {
   Bell, Plus, TrendingUp, TrendingDown,
   Target, Search, Trash2, BarChart3, Zap,
-  ArrowRight, Activity, Power, Wifi, WifiOff, RefreshCw, X, Pencil, Check,
+  ArrowRight, Activity, Power, Wifi, WifiOff, RefreshCw, X, Pencil, Check, Mail,
 } from 'lucide-react';
 import { UserButton, useUser } from '@clerk/nextjs';
 import axios from 'axios';
@@ -143,6 +143,10 @@ export default function EMAAlertSystem() {
   const [editingPairIndex, setEditingPairIndex] = useState<number | null>(null);
   const [editPairFast, setEditPairFast] = useState<number>(9);
   const [editPairSlow, setEditPairSlow] = useState<number>(21);
+  const [showRefreshModal, setShowRefreshModal] = useState(true);
+  const [refreshModalMinTimeElapsed, setRefreshModalMinTimeElapsed] = useState(false);
+  const [testEmailStatus, setTestEmailStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle');
+  const [testEmailMessage, setTestEmailMessage] = useState<string | null>(null);
   const hasRestoredRef = useRef(false);
   const hasRestoredMonitoredRef = useRef(false);
   const { user: clerkUser } = useUser();
@@ -164,6 +168,18 @@ export default function EMAAlertSystem() {
   );
 
   useEffect(() => { setMounted(true); }, []);
+
+  // Refresh modal: show on load, hide when connected and monitoring ready (min 1.5s), or after 4s max
+  useEffect(() => {
+    const minT = setTimeout(() => setRefreshModalMinTimeElapsed(true), 1500);
+    const maxT = setTimeout(() => setShowRefreshModal(false), 4000);
+    return () => { clearTimeout(minT); clearTimeout(maxT); };
+  }, []);
+  useEffect(() => {
+    if (refreshModalMinTimeElapsed && connected && monitorStatus === '') {
+      setShowRefreshModal(false);
+    }
+  }, [refreshModalMinTimeElapsed, connected, monitorStatus]);
 
   // Check if push is configured on this deployment (e.g. Vercel returns 503 without VAPID env)
   useEffect(() => {
@@ -728,6 +744,30 @@ export default function EMAAlertSystem() {
     }
   };
 
+  const sendTestEmail = async () => {
+    setTestEmailStatus('sending');
+    setTestEmailMessage(null);
+    try {
+      const res = await axios.post<{ success: boolean; message?: string; error?: string; email?: string }>('/api/test-email');
+      if (res.data.success) {
+        setTestEmailStatus('success');
+        setTestEmailMessage(res.data.message ?? (res.data.email ? `Sent to ${res.data.email}` : null));
+        setTimeout(() => { setTestEmailStatus('idle'); setTestEmailMessage(null); }, 5000);
+      } else {
+        setTestEmailStatus('error');
+        setTestEmailMessage(res.data.error ?? 'Send failed');
+        setTimeout(() => { setTestEmailStatus('idle'); setTestEmailMessage(null); }, 5000);
+      }
+    } catch (err: unknown) {
+      setTestEmailStatus('error');
+      const msg = err && typeof err === 'object' && 'response' in err && err.response && typeof err.response === 'object' && 'data' in err.response
+        ? (err.response.data as { error?: string })?.error
+        : 'Request failed';
+      setTestEmailMessage(msg ?? 'Request failed');
+      setTimeout(() => { setTestEmailStatus('idle'); setTestEmailMessage(null); }, 5000);
+    }
+  };
+
   const crossoverPairs = useMemo((): [EMA, EMA][] => {
     const pairs: [EMA, EMA][] = [];
     const sorted = [...emas].sort((a, b) => a.period - b.period);
@@ -742,6 +782,30 @@ export default function EMAAlertSystem() {
   // ===================================
   return (
     <div className="min-h-screen text-white overflow-x-hidden safe-area-inset">
+      {/* Refresh modal: shown on load until data is ready */}
+      {showRefreshModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: 'rgba(0,0,0,0.88)', backdropFilter: 'blur(6px)' }}
+          aria-modal="true"
+          role="alertdialog"
+          aria-live="polite"
+        >
+          <div
+            className="max-w-sm w-full rounded-2xl p-6 text-center shadow-2xl border border-[var(--border)]"
+            style={{ backgroundColor: 'var(--card-bg)' }}
+          >
+            <RefreshCw className="w-10 h-10 mx-auto mb-4 animate-spin opacity-80" style={{ color: 'var(--accent)' }} />
+            <h3 className="font-semibold text-base mb-2" style={{ color: 'var(--text-primary)' }}>
+              Fetching refreshed data
+            </h3>
+            <p className="text-sm leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+              Wait a moment until all alerts are showing and monitoring is active again.
+            </p>
+          </div>
+        </div>
+      )}
+
       <div className="max-w-6xl mx-auto w-full min-w-0">
 
         {/* ─── HEADER ─── */}
@@ -764,17 +828,51 @@ export default function EMAAlertSystem() {
               {connected ? <Wifi className="w-3.5 h-3.5 flex-shrink-0" /> : <WifiOff className="w-3.5 h-3.5 flex-shrink-0" />}
               <span>{connected ? 'Live' : 'Offline'}</span>
             </div>
+            {userId && (
+              <div className="flex flex-col items-end gap-0.5">
+                <button
+                  type="button"
+                  onClick={sendTestEmail}
+                  disabled={testEmailStatus === 'sending'}
+                  className="tf-btn flex items-center gap-1.5 !text-xs min-h-[44px]"
+                  title="Send a test email to your account email. Check spam if you don’t see it."
+                >
+                  <Mail className="w-3.5 h-3.5" />
+                  <span>
+                    {testEmailStatus === 'sending' ? 'Sending…' : testEmailStatus === 'success' ? 'Sent!' : testEmailStatus === 'error' ? 'Failed' : 'Test email'}
+                  </span>
+                </button>
+                {testEmailMessage && (
+                  <span className="text-[10px] max-w-[200px] truncate text-right" style={{ color: 'var(--text-muted)' }} title={testEmailMessage}>
+                    {testEmailStatus === 'success' ? testEmailMessage : testEmailMessage}
+                  </span>
+                )}
+              </div>
+            )}
             {mounted && 'serviceWorker' in navigator && (
               pushAvailable === false ? (
-                <span className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-amber-500/30 text-amber-400/90" title="Add VAPID env vars in production to enable push notifications">
-                  Push unavailable
+                <span className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-amber-500/30 text-amber-400/90" title="Add VAPID env vars in production to enable alerts">
+                  Alerts unavailable
                 </span>
               ) : !pushEnabled ? (
-                <button onClick={enablePush} className="tf-btn flex items-center gap-1.5 !text-xs">
+                <button
+                  onClick={enablePush}
+                  className="tf-btn flex items-center gap-1.5 !text-xs"
+                  title="Get crossover alerts on this device (browser notifications + email)"
+                  aria-label="Enable crossover alerts on this device"
+                >
                   <Bell className="w-3.5 h-3.5" />
-                  <span>Push</span>
+                  <span>Enable alerts</span>
                 </button>
-              ) : null
+              ) : (
+                <span
+                  className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-emerald-500/30 text-emerald-400/90 flex items-center gap-1.5"
+                  title="You'll get crossover alerts here and by email"
+                >
+                  <Bell className="w-3.5 h-3.5" />
+                  Alerts on
+                </span>
+              )
             )}
             <div className="flex items-center">
               <UserButton

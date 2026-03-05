@@ -1,42 +1,104 @@
 /**
- * Brevo SMTP email service for relay and notifications.
- * Set BREVO_SMTP_USER (login email) and BREVO_SMTP_PASS (SMTP key) in env.
- * Optional: BREVO_ALERT_TO = comma-separated emails to receive crossover alerts.
+ * Brevo email: API (preferred) or SMTP.
+ * - API: set BREVO_API_KEY (Brevo → Settings → SMTP & API → API keys). Same account as dashboard; credits decrement.
+ * - SMTP: set BREVO_SMTP_USER + BREVO_SMTP_PASS (SMTP key from same page).
+ * Optional: BREVO_FROM_EMAIL, BREVO_ALERT_TO.
  */
 
 import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
 
-const BREVO_HOST = process.env.BREVO_SMTP_HOST || 'smtp-relay.brevo.com';
-const BREVO_PORT = parseInt(process.env.BREVO_SMTP_PORT || '587', 10);
-const BREVO_USER = process.env.BREVO_SMTP_USER || '';
-const BREVO_PASS = process.env.BREVO_SMTP_PASS || '';
-const BREVO_FROM = process.env.BREVO_FROM_EMAIL || process.env.BREVO_SMTP_USER || 'alerts@signalstack.app';
+const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
 
-let transporter: Transporter | null = null;
+function getBrevoConfig() {
+  const host = process.env.BREVO_SMTP_HOST || 'smtp-relay.brevo.com';
+  const port = parseInt(process.env.BREVO_SMTP_PORT || '587', 10);
+  const user = process.env.BREVO_SMTP_USER || '';
+  const pass = process.env.BREVO_SMTP_PASS || '';
+  const from = process.env.BREVO_FROM_EMAIL || process.env.BREVO_SMTP_USER || 'alerts@signalstack.app';
+  return { host, port, user, pass, from };
+}
+
+function getSender() {
+  const from = getBrevoConfig().from;
+  const name = process.env.BREVO_FROM_NAME || 'SignalStack';
+  return { name, email: from };
+}
 
 function getTransporter(): Transporter | null {
-  if (transporter) return transporter;
-  if (!BREVO_USER || !BREVO_PASS) return null;
+  const { host, port, user, pass } = getBrevoConfig();
+  if (!user || !pass) return null;
   try {
-    transporter = nodemailer.createTransport({
-      host: BREVO_HOST,
-      port: BREVO_PORT,
-      secure: BREVO_PORT === 465,
-      auth: { user: BREVO_USER, pass: BREVO_PASS },
+    return nodemailer.createTransport({
+      host,
+      port,
+      secure: port === 465, // false for 587 (STARTTLS)
+      auth: { user, pass },
     });
-    return transporter;
   } catch {
     return null;
   }
 }
 
 export function isBrevoConfigured(): boolean {
-  return !!(BREVO_USER && BREVO_PASS);
+  if (process.env.BREVO_API_KEY?.trim()) return true;
+  const { user, pass } = getBrevoConfig();
+  return !!(user && pass);
 }
 
 /**
- * Send a single email (relay). Use for transactional or custom emails.
+ * Send via Brevo Transactional API (preferred: same account as dashboard, credits decrement).
+ */
+async function sendEmailViaApi(options: {
+  to: string | string[];
+  subject: string;
+  text?: string;
+  html?: string;
+  replyTo?: string;
+}): Promise<{ ok: boolean; error?: string }> {
+  const apiKey = process.env.BREVO_API_KEY?.trim();
+  if (!apiKey) return { ok: false, error: 'BREVO_API_KEY not set' };
+  const sender = getSender();
+  console.log('Brevo API: sending from', sender.email, 'to', Array.isArray(options.to) ? options.to : [options.to]);
+  const toList = Array.isArray(options.to) ? options.to : [options.to];
+  const to = toList.map((e) => (typeof e === 'string' ? { email: e.trim() } : { email: (e as { email: string }).email }));
+  const body: Record<string, unknown> = {
+    sender,
+    to,
+    subject: options.subject,
+  };
+  if (options.html) body.htmlContent = options.html;
+  if (options.text) body.textContent = options.text;
+  if (!body.htmlContent && !body.textContent) body.textContent = '(No content)';
+  if (options.replyTo) body.replyTo = { email: options.replyTo };
+  try {
+    const res = await fetch(BREVO_API_URL, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json',
+        'api-key': apiKey,
+      },
+      body: JSON.stringify(body),
+    });
+    const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    if (!res.ok) {
+      const msg = [data.message, data.code, res.statusText].filter(Boolean).join(' ') || 'Request failed';
+      console.warn('Brevo API error:', res.status, JSON.stringify(data));
+      return { ok: false, error: String(data.message || data.code || msg).trim() || `HTTP ${res.status}` };
+    }
+    const messageId = data.messageId as string | undefined;
+    if (messageId) console.log('Brevo API sent, messageId:', messageId);
+    return { ok: true };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn('Brevo API send failed:', message);
+    return { ok: false, error: message };
+  }
+}
+
+/**
+ * Send a single email. Uses BREVO_API_KEY if set (recommended), else SMTP.
  */
 export async function sendEmail(options: {
   to: string | string[];
@@ -45,20 +107,39 @@ export async function sendEmail(options: {
   html?: string;
   replyTo?: string;
 }): Promise<{ ok: boolean; error?: string }> {
+  if (process.env.BREVO_API_KEY?.trim()) {
+    console.log('Using Brevo API (BREVO_API_KEY is set)');
+    return sendEmailViaApi(options);
+  }
+  console.log('Using Brevo SMTP (BREVO_SMTP_USER)');
   const trans = getTransporter();
   if (!trans) {
-    return { ok: false, error: 'Brevo SMTP not configured (set BREVO_SMTP_USER and BREVO_SMTP_PASS)' };
+    return { ok: false, error: 'Brevo not configured. Set BREVO_API_KEY (recommended) or BREVO_SMTP_USER + BREVO_SMTP_PASS.' };
   }
+  const { from } = getBrevoConfig();
   const to = Array.isArray(options.to) ? options.to.join(', ') : options.to;
   try {
-    await trans.sendMail({
-      from: BREVO_FROM,
+    await trans.verify();
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn('Brevo SMTP verify failed:', message);
+    return {
+      ok: false,
+      error: `Brevo SMTP failed: ${message}. Use SMTP key from Brevo → Settings → SMTP & API (not API key for SMTP).`,
+    };
+  }
+  try {
+    const info = await trans.sendMail({
+      from,
       to,
       subject: options.subject,
       text: options.text,
       html: options.html,
       replyTo: options.replyTo,
     });
+    if (info.messageId) {
+      console.log('Brevo SMTP accepted, messageId:', info.messageId);
+    }
     return { ok: true };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
