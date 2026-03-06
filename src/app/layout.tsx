@@ -35,18 +35,23 @@ export default function RootLayout({
     <ClerkProvider
       appearance={{
         variables: {
-          colorBackground: '#111827',
-          colorInputBackground: '#1e293b',
-          colorText: '#f8fafc',
-          colorTextSecondary: '#94a3b8',
-          colorInputText: '#f8fafc',
+          colorBackground: '#ffffff',
+          colorInputBackground: '#f1f5f9',
+          colorText: '#0f172a',
+          colorTextSecondary: '#475569',
+          colorInputText: '#0f172a',
+          colorPrimary: '#2563eb',
           borderRadius: '12px',
         },
         elements: {
-          card: 'shadow-xl border border-[var(--border-subtle)]',
+          card: 'shadow-xl border border-gray-200 bg-white',
+          cardBox: 'bg-white',
           header: 'hidden',
           navbar: 'hidden',
           navbarMobileMenuRow: 'hidden',
+          formButtonPrimary: 'bg-[#2563eb] text-white',
+          button: 'text-[#0f172a] bg-gray-100 hover:bg-gray-200 border-gray-200',
+          footerActionLink: 'text-[#2563eb]',
         },
       }}
     >

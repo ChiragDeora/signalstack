@@ -71,14 +71,16 @@ self.addEventListener('push', (event) => {
   }
 
   const title = (data.title && String(data.title)) || 'SignalStack Alert';
+  const tag = (data.tag && String(data.tag)) || 'signalstack-alert';
+  const isTest = tag === 'signalstack-test';
   const options = {
     body: (data.body && String(data.body)) || 'EMA crossover detected',
     icon: '/signalstack-logo.png',
     badge: '/signalstack-logo.png',
-    tag: (data.tag && String(data.tag)) || 'signalstack-alert',
+    tag: tag,
     vibrate: [200, 100, 200],
     renotify: true,
-    requireInteraction: false,
+    requireInteraction: isTest,
     silent: false,
     data: {
       url: (data.url && String(data.url)) || '/',

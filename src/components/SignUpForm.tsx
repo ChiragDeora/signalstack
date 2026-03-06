@@ -24,26 +24,26 @@ export function SignUpForm() {
 
   if (loaded && isLoaded && isSignedIn) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[var(--bg-primary)]">
-        <p className="text-[var(--text-muted)]">Redirecting...</p>
+      <div className="min-h-dvh flex items-center justify-center">
+        <p className="text-slate-600">Redirecting...</p>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[var(--bg-primary)]">
+    <div className="min-h-dvh flex items-center justify-center">
       <SignUp
         appearance={{
           variables: {
-            colorPrimary: '#22d3ee',
-            colorBackground: '#111827',
-            colorInputBackground: '#1e293b',
-            colorText: '#f8fafc',
-            colorInputText: '#f8fafc',
+            colorPrimary: '#06b6d4',
+            colorBackground: '#ffffff',
+            colorInputBackground: '#f1f5f9',
+            colorText: '#0f172a',
+            colorInputText: '#0f172a',
           },
           elements: {
             rootBox: 'mx-auto',
-            card: 'bg-[var(--bg-card)] border border-[var(--border-subtle)] shadow-xl',
+            card: 'bg-white border border-slate-200 shadow-xl',
             header: 'hidden',
             navbar: 'hidden',
           },

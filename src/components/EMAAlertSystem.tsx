@@ -191,6 +191,15 @@ export default function EMAAlertSystem() {
       .catch(() => setPushAvailable(false));
   }, [mounted]);
 
+  // Restore "Alerts on" if this browser already has a push subscription (e.g. after refresh)
+  useEffect(() => {
+    if (!mounted || !('serviceWorker' in navigator) || !('PushManager' in window)) return;
+    navigator.serviceWorker.ready
+      .then((reg) => reg.pushManager.getSubscription())
+      .then((sub) => sub != null && setPushEnabled(true))
+      .catch(() => { /* ignore */ });
+  }, [mounted]);
+
   // Restore persisted config once on mount (client-only)
   useEffect(() => {
     if (!mounted || hasRestoredRef.current) return;
@@ -770,28 +779,43 @@ export default function EMAAlertSystem() {
     }
   };
 
-  const sendTestPush = async () => {
+  const sendTestPush = async (delaySeconds = 0) => {
     setTestPushStatus('sending');
     setTestPushMessage(null);
     try {
-      const res = await axios.post<{ success: boolean; message?: string; error?: string; sent?: number; failed?: number }>('/api/push-test');
+      const res = await axios.post<{ success: boolean; message?: string; error?: string; sent?: number; failed?: number; scheduled?: boolean; delaySeconds?: number }>(
+        '/api/push-test',
+        delaySeconds > 0 ? { delaySeconds } : {},
+      );
       if (res.data.success) {
         setTestPushStatus('success');
         const msg = res.data.message ?? (res.data.sent != null ? `Sent to ${res.data.sent} device(s). Check browser or system tray.` : 'Check your browser or system tray.');
         setTestPushMessage(msg);
-        setTimeout(() => { setTestPushStatus('idle'); setTestPushMessage(null); }, 6000);
+        // Show a local notification only for immediate test (not delayed "when closed" test)
+        if (!res.data.scheduled && res.data.sent && res.data.sent > 0 && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+          try {
+            new Notification('🔔 SignalStack – Test notification', {
+              body: "If you see this, browser notifications are working. You'll get crossover alerts the same way.",
+              icon: '/signalstack-logo.png',
+              tag: 'signalstack-test-local',
+            });
+          } catch { /* ignore */ }
+        }
+        setTimeout(() => { setTestPushStatus('idle'); setTestPushMessage(null); }, res.data.scheduled ? 10000 : 6000);
       } else {
         setTestPushStatus('error');
-        setTestPushMessage(res.data.error ?? 'Send failed');
-        setTimeout(() => { setTestPushStatus('idle'); setTestPushMessage(null); }, 5000);
+        const errMsg = res.data.error ?? 'Send failed';
+        setTestPushMessage(errMsg.includes('Enable alerts') ? 'No subscriptions on server. Click "Enable alerts", then try again.' : errMsg);
+        setTimeout(() => { setTestPushStatus('idle'); setTestPushMessage(null); }, 6000);
       }
     } catch (err: unknown) {
       setTestPushStatus('error');
-      const msg = err && typeof err === 'object' && 'response' in err && err.response && typeof err.response === 'object' && 'data' in err.response
-        ? (err.response.data as { error?: string })?.error
-        : 'Request failed';
-      setTestPushMessage(msg ?? 'Request failed');
-      setTimeout(() => { setTestPushStatus('idle'); setTestPushMessage(null); }, 5000);
+      const resData = err && typeof err === 'object' && 'response' in err && err.response && typeof err.response === 'object' && 'data' in err.response
+        ? (err.response as { data?: { error?: string }; status?: number }).data
+        : null;
+      const msg = resData?.error ?? (resData ? 'Request failed' : 'Network or server error. Try again.');
+      setTestPushMessage(msg);
+      setTimeout(() => { setTestPushStatus('idle'); setTestPushMessage(null); }, 6000);
     }
   };
 
@@ -833,20 +857,37 @@ export default function EMAAlertSystem() {
         </div>
       )}
 
-      <div className="max-w-6xl mx-auto w-full min-w-0">
+      <div className="max-w-6xl mx-auto w-full min-w-0 px-4 sm:px-5">
 
-        {/* ─── HEADER ─── */}
-        <header className="flex items-center justify-between gap-2 mb-4 sm:mb-5 flex-wrap sm:flex-nowrap">
-          <div className="flex items-center gap-2 min-w-0 flex-shrink">
-            <img src="/signalstack-logo.png" alt="Logo" className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex-shrink-0" />
-            <div className="min-w-0">
-              <h1 className="text-base sm:text-lg font-bold truncate" style={{ color: 'var(--text-primary)' }}>SignalStack</h1>
-              <p className="text-[10px] sm:text-[11px] font-medium tracking-wider uppercase" style={{ color: 'var(--text-muted)' }}>EMA Alerts</p>
+        {/* ─── HEADER: title + user profile on one line; action buttons on next row ─── */}
+        <header className="mb-4 sm:mb-5">
+          {/* Row 1: Logo + title (left), User profile (right) — same line */}
+          <div className="flex items-center justify-between gap-3 min-w-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <img src="/signalstack-logo.png" alt="Logo" className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex-shrink-0" />
+              <div className="min-w-0">
+                <h1 className="text-base sm:text-lg font-bold truncate" style={{ color: 'var(--text-primary)' }}>SignalStack</h1>
+                <p className="text-[10px] sm:text-[11px] font-medium tracking-wider uppercase" style={{ color: 'var(--text-muted)' }}>EMA Alerts</p>
+              </div>
+            </div>
+            <div className="flex-shrink-0">
+              <UserButton
+                appearance={{
+                  elements: { avatarBox: 'w-9 h-9' },
+                  variables: {
+                    colorPrimary: '#2563eb',
+                    colorBackground: '#ffffff',
+                    colorText: '#0f172a',
+                    colorTextSecondary: '#475569',
+                  },
+                }}
+              />
             </div>
           </div>
-          <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
+          {/* Row 2: Action buttons — wrap within padded container */}
+          <div className="flex flex-wrap items-center gap-2 mt-3 min-w-0">
             <div
-              className={`flex items-center gap-1 sm:gap-1.5 text-xs font-semibold px-2.5 py-2 sm:px-3 rounded-lg border min-h-[44px] ${connected ? 'border-emerald-500/30 text-emerald-400' : 'border-red-500/30 text-red-400'
+              className={`flex items-center gap-1 sm:gap-1.5 text-xs font-semibold px-2.5 py-2 sm:px-3 rounded-lg border min-h-[44px] flex-shrink-0 ${connected ? 'border-emerald-500/30 text-emerald-400' : 'border-red-500/30 text-red-400'
                 }`}
               style={{ background: connected ? 'var(--green-bg)' : 'var(--red-bg)' }}
               title={connected ? 'Real-time updates connected' : 'Not connected. Use the deployment where the Node server runs (e.g. Railway URL) for Live updates.'}
@@ -861,7 +902,7 @@ export default function EMAAlertSystem() {
                   type="button"
                   onClick={sendTestEmail}
                   disabled={testEmailStatus === 'sending'}
-                  className="tf-btn flex items-center gap-1.5 !text-xs min-h-[44px]"
+                  className="tf-btn flex items-center gap-1.5 !text-xs min-h-[44px] flex-shrink-0"
                   title="Send a test email to your account email. Check spam if you don’t see it."
                 >
                   <Mail className="w-3.5 h-3.5" />
@@ -878,7 +919,7 @@ export default function EMAAlertSystem() {
             )}
             {mounted && 'serviceWorker' in navigator && (
               pushAvailable === false ? (
-                <span className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-amber-500/30 text-amber-400/90" title="Add VAPID env vars in production to enable alerts">
+                <span className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-amber-500/30 text-amber-400/90 flex-shrink-0" title="Add VAPID env vars in production to enable alerts">
                   Alerts unavailable
                 </span>
               ) : (
@@ -886,7 +927,7 @@ export default function EMAAlertSystem() {
                   {!pushEnabled ? (
                     <button
                       onClick={enablePush}
-                      className="tf-btn flex items-center gap-1.5 !text-xs"
+                      className="tf-btn flex items-center gap-1.5 !text-xs flex-shrink-0"
                       title="Get crossover alerts on this device (browser notifications + email)"
                       aria-label="Enable crossover alerts on this device"
                     >
@@ -895,7 +936,7 @@ export default function EMAAlertSystem() {
                     </button>
                   ) : (
                     <span
-                      className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-emerald-500/30 text-emerald-400/90 flex items-center gap-1.5"
+                      className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-emerald-500/30 text-emerald-400/90 flex items-center gap-1.5 flex-shrink-0"
                       title="You'll get crossover alerts here and by email"
                     >
                       <Bell className="w-3.5 h-3.5" />
@@ -903,10 +944,10 @@ export default function EMAAlertSystem() {
                     </span>
                   )}
                   <button
-                    onClick={sendTestPush}
-                    disabled={testPushStatus === 'sending' || !pushEnabled}
-                    className="tf-btn flex items-center gap-1.5 !text-xs disabled:opacity-60 disabled:cursor-not-allowed"
-                    title={pushEnabled ? 'Send a test push notification to this device' : 'Enable alerts first to test push'}
+                    onClick={() => sendTestPush(0)}
+                    disabled={testPushStatus === 'sending'}
+                    className="tf-btn flex items-center gap-1.5 !text-xs disabled:opacity-60 disabled:cursor-not-allowed flex-shrink-0"
+                    title="Send a test push now (shows in this tab too)"
                     aria-label="Send test push notification"
                   >
                     <Bell className="w-3.5 h-3.5" />
@@ -914,22 +955,24 @@ export default function EMAAlertSystem() {
                       {testPushStatus === 'sending' ? 'Sending…' : testPushStatus === 'success' ? 'Sent!' : testPushStatus === 'error' ? 'Failed' : 'Test notification'}
                     </span>
                   </button>
+                  <button
+                    onClick={() => sendTestPush(60)}
+                    disabled={testPushStatus === 'sending'}
+                    className="tf-btn flex items-center gap-1.5 !text-xs disabled:opacity-60 disabled:cursor-not-allowed flex-shrink-0"
+                    title="Send test in 1 min—close the browser to verify push when away"
+                    aria-label="Test notification when browser closed"
+                  >
+                    <Bell className="w-3.5 h-3.5" />
+                    <span>Test when closed</span>
+                  </button>
                   {testPushMessage && (
-                    <span className="text-[10px] max-w-[180px] truncate" style={{ color: 'var(--text-muted)' }} title={testPushMessage}>
+                    <span className="text-[10px] max-w-[220px] truncate" style={{ color: 'var(--text-muted)' }} title={testPushMessage}>
                       {testPushMessage}
                     </span>
                   )}
                 </div>
               )
             )}
-            <div className="flex items-center">
-              <UserButton
-                appearance={{
-                  elements: { avatarBox: 'w-9 h-9' },
-                  variables: { colorPrimary: 'var(--accent)' },
-                }}
-              />
-            </div>
           </div>
         </header>
 

@@ -2,7 +2,7 @@
 // Crossover Detection Service
 // ============================================
 // Top-level orchestration: ties data fetching, EMA computation,
-// crossover detection, cron polling, Socket.IO broadcasting,
+// crossover detection, interval polling, Socket.IO broadcasting,
 // and push notifications together.
 
 import * as cron from 'node-cron';
@@ -11,7 +11,7 @@ import { UniversalMarketDataSource } from './dynamicMarketSource';
 import { addAlert, getAlerts } from './alertStore';
 import {
   WatchConfig, CrossoverAlert, PriceUpdate, EmaUpdate,
-  MonitorStatus, PushSubscriptionData, TIMEFRAMES,
+  MonitorStatus, PushSubscriptionData,
 } from './types';
 import {
   sendCrossoverAlertEmail,
@@ -37,7 +37,7 @@ try {
   console.log('⚠️  web-push not installed — push notifications disabled');
 }
 
-const REAL_TIME_POLL_MS = 15_000; // Poll 1m every 15s for near real-time alerts
+const REAL_TIME_POLL_MS = 30_000; // Poll all timeframes every 30s; alerts within ~30s. With 30s: up to 90 total watches (e.g. 30/user for 3 users). Angel One: getCandleData 3/sec, 180/min. See: https://smartapi.angelone.in/smartapi/forum/topic/4387/changes-in-api-rate-limit
 const MAX_WATCHES_PER_USER = 100; // Max symbols×timeframes one user can monitor (segregates API poll load)
 
 function watchJobKey(config: WatchConfig): string {
@@ -135,25 +135,14 @@ export class CrossoverService {
       this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
     }
 
-    // 3. Set up polling: 1m uses 30s interval for real-time alerts; others use cron
-    if (config.timeframe === '1m') {
-      console.log(`⏰ Real-time polling ${config.symbol} (1m) every ${REAL_TIME_POLL_MS / 1000}s${config.userId ? ` [user]` : ''}`);
-      const intervalId = setInterval(() => {
-        this.pollAndProcess(config).catch((err) =>
-          console.error(`Poll error for ${config.symbol}:`, err)
-        );
-      }, REAL_TIME_POLL_MS);
-      this.intervalJobs.set(key, intervalId);
-    } else {
-      const cronExpr = this.getCronExpression(config.timeframe);
-      console.log(`⏰ Scheduling ${config.symbol} (${config.timeframe}) with cron: ${cronExpr}${config.userId ? ` [user]` : ''}`);
-      const job = cron.schedule(cronExpr, () => {
-        this.pollAndProcess(config).catch((err) =>
-          console.error(`Poll error for ${config.symbol}:`, err)
-        );
-      });
-      this.cronJobs.set(key, job);
-    }
+    // 3. Set up polling: all timeframes use 15s interval so alerts arrive within ~15 seconds
+    console.log(`⏰ Polling ${config.symbol} (${config.timeframe}) every ${REAL_TIME_POLL_MS / 1000}s${config.userId ? ` [user]` : ''}`);
+    const intervalId = setInterval(() => {
+      this.pollAndProcess(config).catch((err) =>
+        console.error(`Poll error for ${config.symbol}:`, err)
+      );
+    }, REAL_TIME_POLL_MS);
+    this.intervalJobs.set(key, intervalId);
 
     // 4. Run first poll immediately so data refreshes right away
     this.pollAndProcess(config).catch((err) =>
@@ -305,14 +294,6 @@ export class CrossoverService {
     message?: string,
   ): void {
     this.io?.emit('monitor:status', { symbol, timeframe, status, message } as MonitorStatus);
-  }
-
-  /**
-   * Get cron expression for a timeframe
-   */
-  private getCronExpression(timeframe: string): string {
-    const tf = TIMEFRAMES.find((t) => t.id === timeframe);
-    return tf?.cronExpr || '*/5 * * * *';
   }
 
   // =========================

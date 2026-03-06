@@ -331,30 +331,62 @@ body {
   }
 }
 
-/* ===== CLERK AUTH PAGES (sign-in / sign-up) ===== */
-/* Prevent black boxes and layout glitches; match app dark theme */
+/* ===== CLERK (UserButton dropdown, sign-in / sign-up) ===== */
+/* No dark container: root and wrappers transparent; dark text */
 [data-clerk-component],
 .clerk-box,
 [class*='clerk-'] {
-  --clerk-background: var(--bg-card) !important;
-  --clerk-foreground: var(--text-primary) !important;
+  --clerk-background: #ffffff !important;
+  --clerk-foreground: #0f172a !important;
+  color-scheme: light !important;
+  background: transparent !important;
 }
 
-/* Clerk card/container: use app card background, not solid black */
-[data-clerk-component] > div,
-.clerk-card {
-  background: var(--bg-card) !important;
-  border: 1px solid var(--border-subtle) !important;
-  color: var(--text-primary) !important;
+[data-clerk-component] > div {
+  background: transparent !important;
+  color: #0f172a !important;
 }
 
-/* Fix any fixed/sticky header area (top-right black rectangle) */
+/* Only the form card stays white; rest is transparent so no dark box */
+[data-clerk-component] .clerk-card,
+[data-clerk-component] [class*='card'] {
+  background: #ffffff !important;
+  border: 1px solid #e2e8f0 !important;
+  color: #0f172a !important;
+}
+
+/* Header/navbar in Clerk modal: light */
 [data-clerk-component] header,
 [data-clerk-component] [class*='navbar'],
 [data-clerk-component] [class*='header'] {
-  background: var(--bg-elevated) !important;
-  border-bottom: 1px solid var(--border-subtle) !important;
-  color: var(--text-primary) !important;
+  background: #f8fafc !important;
+  border-bottom: 1px solid #e2e8f0 !important;
+  color: #0f172a !important;
+}
+
+/* Buttons and links in Clerk: dark text on light, primary for CTAs */
+[data-clerk-component] button,
+[data-clerk-component] a {
+  color: #0f172a !important;
+}
+[data-clerk-component] button[type='submit'],
+[data-clerk-component] a[data-primary-link] {
+  background: #2563eb !important;
+  color: #ffffff !important;
+}
+[data-clerk-component] input {
+  background: #f1f5f9 !important;
+  color: #0f172a !important;
+  border-color: #e2e8f0 !important;
+}
+
+/* All text in Clerk: dark for readability on light background */
+[data-clerk-component] p,
+[data-clerk-component] span,
+[data-clerk-component] label,
+[data-clerk-component] h1,
+[data-clerk-component] h2 {
+  color: #0f172a !important;
 }
 
 /* Contain layout so no stray chars (e.g. "N") escape */
