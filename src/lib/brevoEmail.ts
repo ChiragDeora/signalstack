@@ -161,6 +161,22 @@ export function getAlertRecipientEmails(): string[] {
 }
 
 /**
+ * Format alert timestamp for email: readable date and time in IST (e.g. "6 Mar 2026, 2:45 PM IST").
+ */
+function formatAlertTimestamp(isoTimestamp: string): string {
+  try {
+    const date = new Date(isoTimestamp);
+    return date.toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      dateStyle: 'medium',
+      timeStyle: 'short',
+    }) + ' IST';
+  } catch {
+    return isoTimestamp;
+  }
+}
+
+/**
  * Send crossover alert emails to BREVO_ALERT_TO and optionally to the signed-in user's email.
  * @param alert - Crossover alert payload
  * @param userEmail - Optional: Clerk user's email (signed-in user who is monitoring)
@@ -186,6 +202,7 @@ export async function sendCrossoverAlertEmail(
   if (recipients.length === 0) return;
   if (!isBrevoConfigured()) return;
 
+  const timeStr = formatAlertTimestamp(alert.timestamp);
   const emoji = alert.crossoverType === 'bullish' ? '📈' : '📉';
   const direction = alert.crossoverType === 'bullish' ? 'Bullish' : 'Bearish';
   const subject = `${emoji} ${direction} Crossover: ${alert.symbol} (${alert.timeframe})`;
@@ -195,12 +212,12 @@ export async function sendCrossoverAlertEmail(
     `Timeframe: ${alert.timeframe}\n` +
     `EMA(${alert.fastPeriod}) crossed ${alert.crossoverType === 'bullish' ? 'above' : 'below'} EMA(${alert.slowPeriod})\n` +
     `Price: ${alert.currency} ${alert.price}\n` +
-    `Time: ${alert.timestamp}`;
+    `Time: ${timeStr}`;
   const html =
     `<p><strong>${direction} crossover</strong></p>` +
     `<p>Symbol: <strong>${alert.symbol}</strong> · Timeframe: ${alert.timeframe}</p>` +
     `<p>EMA(${alert.fastPeriod}) crossed ${alert.crossoverType === 'bullish' ? 'above' : 'below'} EMA(${alert.slowPeriod}) at ${alert.currency} ${alert.price}</p>` +
-    `<p><small>${alert.timestamp}</small></p>`;
+    `<p><small>${timeStr}</small></p>`;
 
   const result = await sendEmail({ to: recipients, subject, text, html });
   if (!result.ok) console.warn('Brevo crossover alert email failed:', result.error);
