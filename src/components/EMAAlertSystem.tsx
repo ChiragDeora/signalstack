@@ -147,6 +147,8 @@ export default function EMAAlertSystem() {
   const [refreshModalMinTimeElapsed, setRefreshModalMinTimeElapsed] = useState(false);
   const [testEmailStatus, setTestEmailStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle');
   const [testEmailMessage, setTestEmailMessage] = useState<string | null>(null);
+  const [testPushStatus, setTestPushStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle');
+  const [testPushMessage, setTestPushMessage] = useState<string | null>(null);
   const hasRestoredRef = useRef(false);
   const hasRestoredMonitoredRef = useRef(false);
   const { user: clerkUser } = useUser();
@@ -768,6 +770,31 @@ export default function EMAAlertSystem() {
     }
   };
 
+  const sendTestPush = async () => {
+    setTestPushStatus('sending');
+    setTestPushMessage(null);
+    try {
+      const res = await axios.post<{ success: boolean; message?: string; error?: string; sent?: number; failed?: number }>('/api/push-test');
+      if (res.data.success) {
+        setTestPushStatus('success');
+        const msg = res.data.message ?? (res.data.sent != null ? `Sent to ${res.data.sent} device(s). Check browser or system tray.` : 'Check your browser or system tray.');
+        setTestPushMessage(msg);
+        setTimeout(() => { setTestPushStatus('idle'); setTestPushMessage(null); }, 6000);
+      } else {
+        setTestPushStatus('error');
+        setTestPushMessage(res.data.error ?? 'Send failed');
+        setTimeout(() => { setTestPushStatus('idle'); setTestPushMessage(null); }, 5000);
+      }
+    } catch (err: unknown) {
+      setTestPushStatus('error');
+      const msg = err && typeof err === 'object' && 'response' in err && err.response && typeof err.response === 'object' && 'data' in err.response
+        ? (err.response.data as { error?: string })?.error
+        : 'Request failed';
+      setTestPushMessage(msg ?? 'Request failed');
+      setTimeout(() => { setTestPushStatus('idle'); setTestPushMessage(null); }, 5000);
+    }
+  };
+
   const crossoverPairs = useMemo((): [EMA, EMA][] => {
     const pairs: [EMA, EMA][] = [];
     const sorted = [...emas].sort((a, b) => a.period - b.period);
@@ -854,24 +881,45 @@ export default function EMAAlertSystem() {
                 <span className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-amber-500/30 text-amber-400/90" title="Add VAPID env vars in production to enable alerts">
                   Alerts unavailable
                 </span>
-              ) : !pushEnabled ? (
-                <button
-                  onClick={enablePush}
-                  className="tf-btn flex items-center gap-1.5 !text-xs"
-                  title="Get crossover alerts on this device (browser notifications + email)"
-                  aria-label="Enable crossover alerts on this device"
-                >
-                  <Bell className="w-3.5 h-3.5" />
-                  <span>Enable alerts</span>
-                </button>
               ) : (
-                <span
-                  className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-emerald-500/30 text-emerald-400/90 flex items-center gap-1.5"
-                  title="You'll get crossover alerts here and by email"
-                >
-                  <Bell className="w-3.5 h-3.5" />
-                  Alerts on
-                </span>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {!pushEnabled ? (
+                    <button
+                      onClick={enablePush}
+                      className="tf-btn flex items-center gap-1.5 !text-xs"
+                      title="Get crossover alerts on this device (browser notifications + email)"
+                      aria-label="Enable crossover alerts on this device"
+                    >
+                      <Bell className="w-3.5 h-3.5" />
+                      <span>Enable alerts</span>
+                    </button>
+                  ) : (
+                    <span
+                      className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-emerald-500/30 text-emerald-400/90 flex items-center gap-1.5"
+                      title="You'll get crossover alerts here and by email"
+                    >
+                      <Bell className="w-3.5 h-3.5" />
+                      Alerts on
+                    </span>
+                  )}
+                  <button
+                    onClick={sendTestPush}
+                    disabled={testPushStatus === 'sending' || !pushEnabled}
+                    className="tf-btn flex items-center gap-1.5 !text-xs disabled:opacity-60 disabled:cursor-not-allowed"
+                    title={pushEnabled ? 'Send a test push notification to this device' : 'Enable alerts first to test push'}
+                    aria-label="Send test push notification"
+                  >
+                    <Bell className="w-3.5 h-3.5" />
+                    <span>
+                      {testPushStatus === 'sending' ? 'Sending…' : testPushStatus === 'success' ? 'Sent!' : testPushStatus === 'error' ? 'Failed' : 'Test notification'}
+                    </span>
+                  </button>
+                  {testPushMessage && (
+                    <span className="text-[10px] max-w-[180px] truncate" style={{ color: 'var(--text-muted)' }} title={testPushMessage}>
+                      {testPushMessage}
+                    </span>
+                  )}
+                </div>
               )
             )}
             <div className="flex items-center">

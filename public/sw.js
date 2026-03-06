@@ -61,21 +61,27 @@ self.addEventListener('fetch', (event) => {
 self.addEventListener('push', (event) => {
   let data = {};
   try {
-    data = event.data ? event.data.json() : {};
+    if (event.data) {
+      const parsed = event.data.json();
+      data = parsed && typeof parsed === 'object' ? parsed : {};
+    }
   } catch {
-    data = { title: 'SignalStack', body: event.data ? event.data.text() : 'New alert' };
+    const text = event.data ? event.data.text() : '';
+    data = { title: 'SignalStack', body: text || 'New alert' };
   }
 
-  const title = data.title || 'SignalStack Alert';
+  const title = (data.title && String(data.title)) || 'SignalStack Alert';
   const options = {
-    body: data.body || 'EMA crossover detected',
+    body: (data.body && String(data.body)) || 'EMA crossover detected',
     icon: '/signalstack-logo.png',
     badge: '/signalstack-logo.png',
-    tag: data.tag || 'signalstack-alert',
+    tag: (data.tag && String(data.tag)) || 'signalstack-alert',
     vibrate: [200, 100, 200],
     renotify: true,
+    requireInteraction: false,
+    silent: false,
     data: {
-      url: data.url || '/',
+      url: (data.url && String(data.url)) || '/',
     },
     actions: [
       { action: 'open', title: 'Open' },
@@ -83,7 +89,11 @@ self.addEventListener('push', (event) => {
     ],
   };
 
-  event.waitUntil(self.registration.showNotification(title, options));
+  event.waitUntil(
+    self.registration.showNotification(title, options).catch((err) => {
+      console.error('SignalStack SW: showNotification failed', err);
+    })
+  );
 });
 
 // Notification click handler

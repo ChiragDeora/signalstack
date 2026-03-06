@@ -1,19 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@clerk/nextjs/server';
-import { CrossoverService } from '@/lib/crossoverService';
+import { getOrCreateCrossoverService } from '@/lib/crossoverServiceSingleton';
+import { savePushSubscription, removePushSubscription } from '@/lib/pushSubscriptionPersistence';
 import { getClerkUserEmail } from '@/lib/clerkUserEmail';
 import { sendEmail, isBrevoConfigured } from '@/lib/brevoEmail';
-
-let service: CrossoverService | null = null;
-
-function getOrCreateService(): CrossoverService {
-  if (!service) {
-    const io = (global as any).__io || null;
-    service = new CrossoverService(io);
-    service.initialize();
-  }
-  return service;
-}
 
 // POST: Subscribe to push notifications
 export async function POST(req: NextRequest) {
@@ -27,14 +17,24 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const svc = getOrCreateService();
-    svc.addPushSubscription({
+    const subData = {
       endpoint: subscription.endpoint,
       keys: {
         p256dh: subscription.keys.p256dh,
         auth: subscription.keys.auth,
       },
-    });
+    };
+    const svc = await getOrCreateCrossoverService();
+    svc.addPushSubscription(subData);
+    await savePushSubscription(subData).catch((e) => console.warn('Persist push subscription failed:', e?.message));
+
+    // Send a test push immediately so the user sees a browser notification right away
+    try {
+      const { sent } = await svc.sendTestPushNotification();
+      if (sent > 0) console.log('✅ Test push sent to new subscriber');
+    } catch (e) {
+      console.warn('Test push on subscribe failed:', (e as Error)?.message);
+    }
 
     // Send a one-time test email so the user can confirm push/notifications are working
     const { userId } = await auth();
@@ -89,8 +89,9 @@ export async function DELETE(req: NextRequest) {
       );
     }
 
-    const svc = getOrCreateService();
+    const svc = await getOrCreateCrossoverService();
     svc.removePushSubscription(endpoint);
+    await removePushSubscription(endpoint).catch((e) => console.warn('Persist remove push subscription failed:', e?.message));
 
     return NextResponse.json({ success: true, message: 'Push subscription removed' });
   } catch {

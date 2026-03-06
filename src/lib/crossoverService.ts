@@ -53,6 +53,8 @@ function countWatchesForUser(userId: string, cronJobs: Map<string, unknown>, int
   return n;
 }
 
+export type OnSubscriptionExpired = (endpoint: string) => void | Promise<void>;
+
 export class CrossoverService {
   private engine: EMAEngine;
   private dataSource: UniversalMarketDataSource;
@@ -60,12 +62,14 @@ export class CrossoverService {
   private cronJobs: Map<string, cron.ScheduledTask> = new Map();
   private intervalJobs: Map<string, NodeJS.Timeout> = new Map(); // 1m real-time polling
   private pushSubscriptions: Map<string, PushSubscriptionData> = new Map();
+  private onSubscriptionExpired?: OnSubscriptionExpired;
   private initialized = false;
 
-  constructor(io: any) {
+  constructor(io: any, options?: { onSubscriptionExpired?: OnSubscriptionExpired }) {
     this.io = io;
     this.engine = new EMAEngine();
     this.dataSource = new UniversalMarketDataSource();
+    this.onSubscriptionExpired = options?.onSubscriptionExpired;
   }
 
   async initialize(): Promise<void> {
@@ -161,6 +165,23 @@ export class CrossoverService {
   }
 
   /**
+   * Restore all persisted watches (call on server startup so monitoring survives restarts).
+   */
+  async restoreAllWatches(configs: WatchConfig[]): Promise<void> {
+    if (!configs?.length) return;
+    console.log(`📂 Restoring ${configs.length} persisted watch(es)...`);
+    for (const config of configs) {
+      try {
+        const result = await this.startMonitoring(config);
+        if (result.success) console.log(`   ✓ ${config.symbol} (${config.timeframe})`);
+        else console.warn(`   ✗ ${config.symbol}: ${result.message}`);
+      } catch (err: any) {
+        console.warn(`   ✗ ${config.symbol} (${config.timeframe}):`, err?.message || err);
+      }
+    }
+  }
+
+  /**
    * Stop monitoring a symbol (optionally scoped by userId)
    */
   async stopMonitoring(symbol: string, timeframe?: string, userId?: string): Promise<void> {
@@ -206,7 +227,7 @@ export class CrossoverService {
       // Emit price update
       this.emitPriceUpdate(config.symbol, config.timeframe, priceData);
 
-      // Process through EMA engine
+      // Process through EMA engine (pass price timestamp so alert time = crossover time, not send time)
       const alerts = this.engine.processTick(
         config.symbol,
         config.timeframe,
@@ -214,6 +235,7 @@ export class CrossoverService {
         priceData.currency,
         priceData.source,
         config.userId,
+        priceData.timestamp,
       );
 
       // Emit EMA update
@@ -325,11 +347,43 @@ export class CrossoverService {
         if (err.statusCode === 410 || err.statusCode === 404) {
           this.pushSubscriptions.delete(endpoint);
           console.log(`🔔 Removed expired push subscription`);
+          await this.onSubscriptionExpired?.(endpoint);
         }
       }
     });
 
     await Promise.allSettled(promises);
+  }
+
+  /**
+   * Send a test push notification to all subscriptions (for "Test notification" button).
+   */
+  async sendTestPushNotification(): Promise<{ sent: number; failed: number }> {
+    let sent = 0;
+    let failed = 0;
+    if (!webpush || this.pushSubscriptions.size === 0) return { sent: 0, failed: 0 };
+
+    const payload = JSON.stringify({
+      title: '🔔 SignalStack – Test notification',
+      body: "If you see this, push alerts are working. You'll get crossover alerts the same way.",
+      tag: 'signalstack-test',
+      url: '/',
+    });
+    const options = { TTL: 60, urgency: 'high' as const };
+
+    for (const [endpoint, sub] of this.pushSubscriptions) {
+      try {
+        await webpush.sendNotification(sub, payload, options);
+        sent++;
+      } catch (err: any) {
+        if (err.statusCode === 410 || err.statusCode === 404) {
+          this.pushSubscriptions.delete(endpoint);
+          await this.onSubscriptionExpired?.(endpoint);
+        }
+        failed++;
+      }
+    }
+    return { sent, failed };
   }
 
   // =========================

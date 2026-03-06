@@ -292,7 +292,7 @@ export class AngelOneDataSource {
       change: parseFloat(change.toFixed(2)),
       changePercent: parseFloat(changePercent.toFixed(2)),
       volume: latestCandle.volume,
-      timestamp: new Date().toISOString(),
+      timestamp: new Date(latestCandle.timestamp).toISOString(),
       timeframe,
       candleData: candles,
       market,

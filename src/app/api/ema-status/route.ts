@@ -1,17 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@clerk/nextjs/server';
-import { CrossoverService } from '@/lib/crossoverService';
-
-let service: CrossoverService | null = null;
-
-function getOrCreateService(): CrossoverService {
-  if (!service) {
-    const io = (global as any).__io || null;
-    service = new CrossoverService(io);
-    service.initialize();
-  }
-  return service;
-}
+import { getOrCreateCrossoverService } from '@/lib/crossoverServiceSingleton';
 
 /**
  * GET: Return current EMA values and warmup progress for a symbol+timeframe.
@@ -32,7 +21,7 @@ export async function GET(req: NextRequest) {
     }
 
     const { userId } = await auth();
-    const svc = getOrCreateService();
+    const svc = await getOrCreateCrossoverService();
     const status = svc.getEmaStatus(symbol, timeframe, userId ?? undefined);
 
     if (!status) {

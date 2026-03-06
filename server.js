@@ -44,11 +44,17 @@ app.prepare().then(async () => {
     console.log(`📡 WebSocket server running`);
     console.log(`📊 EMA Crossover Detection Engine loaded\n`);
 
+    const base = `http://127.0.0.1:${PORT}`;
     // Pre-warm the Dhan scrip master so the first search is instant
-    fetch(`http://localhost:${PORT}/api/warmup`)
+    fetch(`${base}/api/warmup`)
       .then(r => r.json())
       .then(d => console.log(d.ok ? '✅ Scrip master pre-loaded' : `⚠️  Warmup: ${d.reason}`))
       .catch(e => console.warn('⚠️  Warmup fetch failed:', e.message));
+    // Restore persisted watches so monitoring runs 24/7 without opening the app
+    fetch(`${base}/api/monitor`)
+      .then(r => r.json())
+      .then(d => (d.success && d.watchedSymbols?.length > 0 ? console.log('✅ Restored', d.watchedSymbols?.length, 'watch(es)') : null))
+      .catch(e => console.warn('⚠️  Monitor restore fetch failed:', e.message));
   });
 
   // Graceful shutdown

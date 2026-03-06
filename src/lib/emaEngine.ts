@@ -148,6 +148,7 @@ export class EMAEngine {
     currency: string,
     source: string = 'tick',
     userId?: string,
+    priceTimestamp?: string,
   ): CrossoverAlert[] {
     const key = this.makeKey(symbol, timeframe, userId);
     const state = this.symbols.get(key);
@@ -168,6 +169,8 @@ export class EMAEngine {
       if (ema1Val !== null && ema1Val !== undefined && ema2Val !== null && ema2Val !== undefined) {
         const result = detector.checkCrossover(ema1Val, ema2Val, price, symbol);
         if (result) {
+          // Use price/candle timestamp so alert shows when crossover occurred, not when we sent it
+          const alertTimestamp = priceTimestamp || result.timestamp;
           const alert: CrossoverAlert = {
             id: randomUUID(),
             symbol,
@@ -179,7 +182,7 @@ export class EMAEngine {
             crossoverType: result.type,
             price: parseFloat(price.toFixed(2)),
             currency,
-            timestamp: result.timestamp,
+            timestamp: alertTimestamp,
             source,
           };
           alerts.push(alert);

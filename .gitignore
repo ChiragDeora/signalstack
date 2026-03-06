@@ -43,6 +43,9 @@ next-env.d.ts
 # Dhan scrip master disk cache
 .scrip-cache.json
 
+# Server-persisted watches (runtime; survives restarts locally)
+/data/
+
 # Auto-generated VAPID keys (optional; can use env vars instead)
 .vapid-keys.json
 

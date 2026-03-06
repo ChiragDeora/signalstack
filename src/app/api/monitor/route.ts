@@ -1,19 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@clerk/nextjs/server';
-import { CrossoverService } from '@/lib/crossoverService';
+import { getOrCreateCrossoverService } from '@/lib/crossoverServiceSingleton';
 import { WatchConfig } from '@/lib/types';
-
-// Lazy-initialize the service using the global Socket.IO instance
-let service: CrossoverService | null = null;
-
-function getOrCreateService(): CrossoverService {
-  if (!service) {
-    const io = (global as any).__io || null;
-    service = new CrossoverService(io);
-    service.initialize();
-  }
-  return service;
-}
+import { saveWatch, removeWatch } from '@/lib/watchPersistence';
 
 // POST: Start monitoring a symbol (requires auth; segregates polls per user)
 export async function POST(req: NextRequest) {
@@ -44,9 +33,11 @@ export async function POST(req: NextRequest) {
       currency: currency || 'INR',
     };
 
-    const svc = getOrCreateService();
+    const svc = await getOrCreateCrossoverService();
     const result = await svc.startMonitoring(config);
-
+    if (result.success) {
+      await saveWatch(config).catch((e) => console.warn('Persist watch failed:', e?.message));
+    }
     return NextResponse.json(result);
   } catch (error: any) {
     console.error('❌ Monitor start error:', error);
@@ -75,8 +66,9 @@ export async function DELETE(req: NextRequest) {
       );
     }
 
-    const svc = getOrCreateService();
+    const svc = await getOrCreateCrossoverService();
     await svc.stopMonitoring(symbol, timeframe, userId);
+    await removeWatch(userId, symbol, timeframe).catch((e) => console.warn('Persist remove watch failed:', e?.message));
 
     return NextResponse.json({
       success: true,
@@ -94,7 +86,7 @@ export async function DELETE(req: NextRequest) {
 // GET: Get monitoring status
 export async function GET() {
   try {
-    const svc = getOrCreateService();
+    const svc = await getOrCreateCrossoverService();
     const info = svc.getMonitoringInfo();
 
     return NextResponse.json({
