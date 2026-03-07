@@ -379,6 +379,16 @@ body {
   color: #0f172a !important;
   border-color: #e2e8f0 !important;
 }
+[data-clerk-component] input::placeholder {
+  color: #64748b !important;
+  opacity: 1;
+}
+/* Target Clerk's form container so the whole card is light */
+[data-clerk-component] form,
+[data-clerk-component] [role='presentation'] {
+  background: #ffffff !important;
+  color: #0f172a !important;
+}
 
 /* All text in Clerk: dark for readability on light background */
 [data-clerk-component] p,

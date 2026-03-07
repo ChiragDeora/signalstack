@@ -3,12 +3,32 @@
 // ============================================
 // Login with client code + password + TOTP → JWT.
 // Historical: getCandleData. Symbol lookup: searchScrip.
+// Margin Calculator (NSE/BSE, mode FULL): https://smartapi.angelbroking.com/docs/MarginCalculator
 // Docs: https://smartapi.angelbroking.com/docs
 
 import crypto from 'crypto';
 import { CandleData, PriceData, SearchResult, MarketInfo } from './types';
 
+// Official SmartAPI: single host for all endpoints (from Angel One Python SDK)
 const ANGEL_BASE = 'https://apiconnect.angelone.in';
+// Public scrip master when searchScrip API returns Access denied / INTERNAL SERVER ERROR
+const SCRIP_MASTER_URL = 'https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json';
+
+type ScripRow = { token?: string; symbol?: string; name?: string; exch_seg?: string; instrumenttype?: string; expiry?: string };
+
+/** Parse scrip master expiry "25JAN2024" or "28OCT2025" (DDMMMYYYY) to timestamp for sorting. */
+function parseExpiry(expiry: string | undefined): number {
+  if (!expiry || !/^\d{2}[A-Z]{3}\d{4}$/i.test(expiry.trim())) return 0;
+  const months: Record<string, number> = { JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5, JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11 };
+  const d = expiry.trim().toUpperCase();
+  const day = parseInt(d.slice(0, 2), 10);
+  const mon = months[d.slice(2, 5)] ?? 0;
+  const year = parseInt(d.slice(5, 9), 10);
+  return new Date(year, mon, day).getTime();
+}
+let scripMasterCache: ScripRow[] | null = null;
+let scripMasterFetchedAt = 0;
+const SCRIP_MASTER_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 // RFC 4648 base32 alphabet
 const B32_ALPHA = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -65,6 +85,8 @@ export class AngelOneDataSource {
   private password: string;
   private totpSecret: string;
   private session: AngelSession | null = null;
+  /** Single in-flight promise so many concurrent callers don't all trigger login at once. */
+  private sessionPromise: Promise<boolean> | null = null;
 
   constructor() {
     this.apiKey = process.env.ANGEL_API_KEY || '';
@@ -107,7 +129,22 @@ export class AngelOneDataSource {
         headers: this.getHeaders(false),
         body: JSON.stringify(body),
       });
-      const json = (await res.json()) as { status: boolean; data?: { jwtToken: string; refreshToken: string; feedToken: string } };
+      const raw = await res.text();
+      if (typeof raw !== 'string' || raw.length === 0) {
+        console.error('❌ Angel One login: empty response');
+        return false;
+      }
+      if (raw.startsWith('Access den') || raw.startsWith('<') || raw.includes('Access Denied')) {
+        console.error('❌ Angel One login: Access denied or HTML response (auth server)');
+        return false;
+      }
+      let json: { status: boolean; data?: { jwtToken: string; refreshToken: string; feedToken: string } };
+      try {
+        json = JSON.parse(raw);
+      } catch (e: any) {
+        console.error('❌ Angel One login error:', e?.message || e);
+        return false;
+      }
       if (!json.status || !json.data?.jwtToken) {
         console.error('❌ Angel One login failed:', (json as any).message || res.status);
         return false;
@@ -128,6 +165,23 @@ export class AngelOneDataSource {
 
   private async ensureSession(): Promise<boolean> {
     if (this.session && this.session.expiresAt > Date.now() + 60_000) return true;
+    if (this.sessionPromise) return this.sessionPromise;
+    this.sessionPromise = (async () => {
+      try {
+        const ok = await this.doRefreshOrLogin();
+        return ok;
+      } finally {
+        this.sessionPromise = null;
+      }
+    })();
+    return this.sessionPromise;
+  }
+
+  private async doRefreshOrLogin(): Promise<boolean> {
+    if (this.session?.refreshToken) {
+      const ok = await this.refreshToken();
+      if (ok) return true;
+    }
     return this.login();
   }
 
@@ -142,7 +196,18 @@ export class AngelOneDataSource {
         },
         body: JSON.stringify({ refreshToken: this.session.refreshToken }),
       });
-      const json = (await res.json()) as { status: boolean; data?: { jwtToken: string; refreshToken: string; feedToken: string } };
+      const raw = await res.text();
+      if (typeof raw !== 'string' || raw.length === 0) return this.login();
+      if (raw.startsWith('Access den') || raw.startsWith('<') || raw.includes('Access Denied')) {
+        console.warn('⚠️ Angel One refresh: Access denied, falling back to full login');
+        return this.login();
+      }
+      let json: { status: boolean; data?: { jwtToken: string; refreshToken: string; feedToken: string } };
+      try {
+        json = JSON.parse(raw);
+      } catch {
+        return this.login();
+      }
       if (!json.status || !json.data?.jwtToken) return this.login();
       this.session = {
         jwtToken: json.data.jwtToken,
@@ -156,36 +221,285 @@ export class AngelOneDataSource {
     }
   }
 
+  /** Call searchScrip (single host: apiconnect.angelone.in per official SDK). */
+  private async searchScripApi(exchange: string, searchscrip: string): Promise<{ status: boolean; data?: Array<{ symboltoken: string; tradingsymbol: string }>; message?: string }> {
+    const path = '/rest/secure/angelbroking/order/v1/searchScrip';
+    const res = await fetch(`${ANGEL_BASE}${path}`, {
+      method: 'POST',
+      headers: this.getHeaders(true),
+      body: JSON.stringify({ exchange, searchscrip }),
+    });
+    if (res.status === 401 || res.status === 403) throw new Error('Auth');
+    const raw = await res.text();
+    if (typeof raw !== 'string' || raw.length === 0) {
+      return { status: false, message: 'Empty response' };
+    }
+    // Bug #1: Angel returns HTTP 200 with HTML "Access Denied" — treat as auth failure so we re-login
+    if (
+      raw.startsWith('Access den') ||
+      raw.includes('Access Denied') ||
+      raw.startsWith('<') ||
+      raw.startsWith('<!DOCTYPE')
+    ) {
+      console.log('[angelOne.searchScrip] HTML/Access Denied - re-authenticating');
+      throw new Error('Auth');
+    }
+    type SearchScripResponse = { status?: boolean; data?: Array<{ symboltoken?: string; tradingsymbol?: string }>; message?: string };
+    let json: SearchScripResponse;
+    try {
+      json = JSON.parse(raw) as SearchScripResponse;
+    } catch {
+      console.log('[angelOne.searchScrip] non-JSON (first 150 chars):', raw.slice(0, 150));
+      return { status: false, message: 'Invalid JSON response' };
+    }
+    if (!json || typeof json !== 'object') return { status: false, message: 'Invalid response' };
+    if (json.status && Array.isArray(json.data) && json.data.length > 0) {
+      return json as { status: boolean; data: Array<{ symboltoken: string; tradingsymbol: string }>; message?: string };
+    }
+    return json as { status: boolean; data?: Array<{ symboltoken: string; tradingsymbol: string }>; message?: string };
+  }
+
+  /** Ensure scrip master is loaded (shared by resolve and search fallback). */
+  private async ensureScripMaster(): Promise<ScripRow[]> {
+    if (scripMasterCache && Date.now() - scripMasterFetchedAt <= SCRIP_MASTER_TTL_MS) {
+      return scripMasterCache;
+    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+    try {
+      const res = await fetch(SCRIP_MASTER_URL, { signal: controller.signal });
+      const raw = await res.text();
+      const parsed = JSON.parse(raw) as ScripRow[] | Record<string, ScripRow>;
+      scripMasterCache = Array.isArray(parsed) ? parsed : Object.values(parsed || {});
+      scripMasterFetchedAt = Date.now();
+      console.log('[angelOne.scripMaster] loaded', scripMasterCache.length, 'rows');
+      return scripMasterCache;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  /** Search scrip master by query (when searchScrip API returns 401/403). Returns NSE, NFO (nearest expiry first), BSE. Optional exchangeFilter limits to one segment. */
+  private async searchSymbolsFromScripMaster(query: string, exchangeFilter?: 'ALL' | 'NSE' | 'NFO' | 'BSE'): Promise<SearchResult[]> {
+    const q = query.toUpperCase().trim();
+    if (!q || q.length < 1) return [];
+    try {
+      const rows = await this.ensureScripMaster();
+      const nseResults: SearchResult[] = [];
+      const nfoList: (SearchResult & { _expiryTs: number })[] = [];
+      const bseResults: SearchResult[] = [];
+      const seen = new Set<string>();
+      const todayStart = new Date();
+      todayStart.setHours(0, 0, 0, 0);
+      const todayTs = todayStart.getTime();
+      const match = (s: string, n: string) => (s && s.toUpperCase().includes(q)) || (n && n.toUpperCase().includes(q));
+      for (const r of rows) {
+        const s = r.symbol || '';
+        const n = r.name || '';
+        const seg = r.exch_seg || '';
+        const key = `${seg}:${s}`;
+        if (seen.has(key)) continue;
+        if (seg === 'NSE' && s.endsWith('-EQ') && match(s, n)) {
+          seen.add(key);
+          nseResults.push({
+            symbol: s.replace(/-EQ$/, ''),
+            name: `${s.replace(/-EQ$/, '')} (NSE Equity)`,
+            exchange: 'NSE',
+            currency: 'INR',
+            country: 'India',
+            type: 'Equity',
+          });
+        } else if (seg === 'NSE' && !s.endsWith('-EQ') && match(s, n)) {
+          seen.add(key);
+          nseResults.push({
+            symbol: s,
+            name: `${s} (NSE)`,
+            exchange: 'NSE',
+            currency: 'INR',
+            country: 'India',
+            type: 'Index',
+          });
+        } else if (seg === 'NFO' && match(s, n)) {
+          seen.add(key);
+          const isFut = s.includes('FUT');
+          const type = isFut ? 'Future' : (s.endsWith('CE') || s.endsWith('PE') ? 'Option' : 'Derivative');
+          nfoList.push({
+            symbol: s,
+            name: `${s} (NFO ${type})`,
+            exchange: 'NFO',
+            currency: 'INR',
+            country: 'India',
+            type,
+            _expiryTs: parseExpiry(r.expiry),
+          });
+        } else if (seg === 'BSE' && match(s, n)) {
+          seen.add(key);
+          bseResults.push({
+            symbol: s,
+            name: `${s.replace(/-EQ$/, '')} (BSE)`,
+            exchange: 'BSE',
+            currency: 'INR',
+            country: 'India',
+            type: 'Equity',
+          });
+        }
+      }
+      // NFO: sort by expiry ascending (nearest/latest month first), prefer current/future expiries
+      nfoList.sort((a, b) => a._expiryTs - b._expiryTs);
+      const nfoFiltered = nfoList.filter((x) => x._expiryTs >= todayTs);
+      const nfoFinal = (nfoFiltered.length > 0 ? nfoFiltered : nfoList).map(({ _expiryTs, ...rest }) => rest);
+      const combined = [...nseResults, ...nfoFinal, ...bseResults];
+      if (exchangeFilter && exchangeFilter !== 'ALL') {
+        const filtered = combined.filter((r) => r.exchange === exchangeFilter);
+        return filtered.slice(0, 30);
+      }
+      return combined.slice(0, 30);
+    } catch (e: any) {
+      console.warn('[angelOne.searchSymbolsFromScripMaster]', e?.message);
+      return [];
+    }
+  }
+
+  /** Resolve symbol from public scrip master when searchScrip API fails. Supports NSE, NFO, BSE. */
+  private async resolveSymbolFromScripMaster(symbol: string, exchange: 'NSE' | 'NFO' | 'BSE' = 'NSE'): Promise<{ symboltoken: string; tradingsymbol: string } | null> {
+    const clean = symbol.toUpperCase().replace(/\.(NS|BO)$/i, '').trim();
+    try {
+      const cache = await this.ensureScripMaster();
+      const seg = exchange;
+      const row = cache.find((r) => {
+        if ((r.exch_seg || '') !== seg) return false;
+        const s = (r.symbol || '').toUpperCase();
+        const n = (r.name || '').toUpperCase();
+        if (seg === 'NSE') {
+          return s === `${clean}-EQ` || s === clean || n.startsWith(clean) || (s.endsWith('-EQ') && s.replace(/-EQ$/, '') === clean);
+        }
+        if (seg === 'NFO') {
+          return s === clean || (n === clean && ((r.instrumenttype || '').startsWith('FUT') || (r.instrumenttype || '').startsWith('OPT')));
+        }
+        if (seg === 'BSE') {
+          return s === clean || n === clean || n.startsWith(clean) || (s.endsWith('-EQ') && s.replace(/-EQ$/, '') === clean);
+        }
+        return false;
+      });
+      if (!row?.token || !row?.symbol) return null;
+      console.log('[angelOne.resolveSymbol]', clean, 'resolved via scrip master', seg + ':', row.symbol);
+      return { symboltoken: String(row.token), tradingsymbol: row.symbol };
+    } catch (e: any) {
+      console.warn('[angelOne.scripMaster]', e?.message);
+      return null;
+    }
+  }
+
   /** Resolve symbol (e.g. RELIANCE or RELIANCE.NS) to NSE symboltoken for equity */
   async resolveSymbol(symbol: string): Promise<{ symboltoken: string; tradingsymbol: string } | null> {
     await this.ensureSession();
     const clean = symbol.toUpperCase().replace(/\.(NS|BO)$/i, '').trim();
     try {
-      const res = await fetch(`${ANGEL_BASE}/rest/secure/angelbroking/order/v1/searchScrip`, {
-        method: 'POST',
-        headers: this.getHeaders(true),
-        body: JSON.stringify({ exchange: 'NSE', searchscrip: clean }),
-      });
-      if (res.status === 401 || res.status === 403) {
+      const json = await this.searchScripApi('NSE', clean);
+      if (!json.status || !Array.isArray(json.data)) {
+        console.warn('[angelOne.resolveSymbol]', clean, 'searchScrip no data:', json.status, json.message, 'rows:', json.data?.length);
+        // Bug #3: Session may be revoked; force re-login on next call
+        if (json.message?.includes('failed on both hosts') || json.message?.toUpperCase().includes('INTERNAL')) {
+          this.session = null;
+          await this.ensureSession();
+        }
+        const fallback = await this.resolveSymbolFromScripMaster(clean);
+        if (fallback) return fallback;
+        return null;
+      }
+      // Prefer NSE equity: tradingsymbol ending with -EQ (e.g. RELIANCE-EQ)
+      let eq = json.data.find((r) => r.tradingsymbol?.endsWith('-EQ'));
+      if (!eq) {
+        // Fallback: exact symbol or symbol-EQ (some APIs return "RELIANCE" only)
+        eq = json.data.find((r) => {
+          const t = (r.tradingsymbol || '').trim();
+          return t === clean || t === `${clean}-EQ` || (t.startsWith(clean) && !t.includes(' '));
+        }) ?? json.data[0];
+      }
+      if (!eq?.symboltoken || !eq?.tradingsymbol) return null;
+      return { symboltoken: eq.symboltoken, tradingsymbol: eq.tradingsymbol };
+    } catch (e: any) {
+      if (e?.message === 'Auth') {
         await this.refreshToken();
         return this.resolveSymbol(symbol);
       }
-      const json = (await res.json()) as { status: boolean; data?: Array<{ symboltoken: string; tradingsymbol: string }> };
-      if (!json.status || !Array.isArray(json.data)) return null;
-      const eq = json.data.find((r) => r.tradingsymbol?.endsWith('-EQ'));
-      if (!eq) return null;
-      return { symboltoken: eq.symboltoken, tradingsymbol: eq.tradingsymbol };
-    } catch (e: any) {
       console.error('Angel searchScrip error:', e?.message);
+      // When API is unreachable (fetch failed, network error), still try scrip master
+      const fallback = await this.resolveSymbolFromScripMaster(clean);
+      if (fallback) return fallback;
       return null;
     }
   }
 
-  async fetchHistoricalCandles(symbol: string, timeframe: string, candleCount = 500): Promise<CandleData[]> {
+  /** Resolve symbol to BSE symboltoken for equity (e.g. RELIANCE or RELIANCE.BO). Falls back to scrip master when searchScrip fails. */
+  async resolveSymbolBSE(symbol: string): Promise<{ symboltoken: string; tradingsymbol: string } | null> {
+    await this.ensureSession();
+    const clean = symbol.toUpperCase().replace(/\.(NS|BO)$/i, '').trim();
+    try {
+      const json = await this.searchScripApi('BSE', clean);
+      if (json.status && Array.isArray(json.data) && json.data.length > 0) {
+        let eq = json.data.find((r) => r.tradingsymbol?.endsWith('-EQ'));
+        if (!eq) eq = json.data.find((r) => (r.tradingsymbol || '').trim() === clean || (r.tradingsymbol || '').trim() === `${clean}-EQ`) ?? json.data[0];
+        if (eq?.symboltoken && eq?.tradingsymbol) return { symboltoken: eq.symboltoken, tradingsymbol: eq.tradingsymbol };
+      }
+      const fallback = await this.resolveSymbolFromScripMaster(clean, 'BSE');
+      if (fallback) return fallback;
+      return null;
+    } catch (e: any) {
+      if (e?.message === 'Auth') {
+        await this.refreshToken();
+        return this.resolveSymbolBSE(symbol);
+      }
+      console.error('Angel searchScrip BSE error:', e?.message);
+      const fallback = await this.resolveSymbolFromScripMaster(clean, 'BSE');
+      if (fallback) return fallback;
+      return null;
+    }
+  }
+
+  /** Resolve symbol to both NSE and BSE tokens for margin calculator (FULL mode with all tokens). */
+  async resolveSymbolNSEAndBSE(symbol: string): Promise<{
+    nse: { symboltoken: string; tradingsymbol: string } | null;
+    bse: { symboltoken: string; tradingsymbol: string } | null;
+  }> {
+    const [nse, bse] = await Promise.all([this.resolveSymbol(symbol), this.resolveSymbolBSE(symbol)]);
+    return { nse, bse };
+  }
+
+  /** Resolve symbol for a given exchange (NSE, NFO, BSE). Used for fetch candles/LTP with correct exchange. Falls back to scrip master when searchScrip API fails. */
+  async resolveSymbolForExchange(symbol: string, exchange: 'NSE' | 'NFO' | 'BSE'): Promise<{ symboltoken: string; tradingsymbol: string } | null> {
+    if (exchange === 'NSE') return this.resolveSymbol(symbol);
+    if (exchange === 'BSE') return this.resolveSymbolBSE(symbol);
+    if (exchange === 'NFO') {
+      await this.ensureSession();
+      const clean = symbol.toUpperCase().replace(/\.(NS|BO)$/i, '').trim();
+      try {
+        const json = await this.searchScripApi('NFO', clean);
+        if (json.status && Array.isArray(json.data) && json.data.length > 0) {
+          const exact = json.data.find((r) => (r.tradingsymbol || '').trim().toUpperCase() === clean) ?? json.data[0];
+          if (exact?.symboltoken && exact?.tradingsymbol) return { symboltoken: exact.symboltoken, tradingsymbol: exact.tradingsymbol };
+        }
+        const fallback = await this.resolveSymbolFromScripMaster(clean, 'NFO');
+        if (fallback) return fallback;
+        return null;
+      } catch (e: any) {
+        if (e?.message === 'Auth') {
+          await this.refreshToken();
+          return this.resolveSymbolForExchange(symbol, 'NFO');
+        }
+        const fallback = await this.resolveSymbolFromScripMaster(clean, 'NFO');
+        if (fallback) return fallback;
+        return null;
+      }
+    }
+    return null;
+  }
+
+  async fetchHistoricalCandles(symbol: string, timeframe: string, candleCount = 500, exchange: 'NSE' | 'NFO' | 'BSE' = 'NSE', retried = false): Promise<CandleData[]> {
     if (!(await this.ensureSession())) return [];
-    const resolved = await this.resolveSymbol(symbol);
+    const resolved = await this.resolveSymbolForExchange(symbol, exchange);
     if (!resolved) {
-      console.warn(`⚠️  Angel: symbol "${symbol}" not found`);
+      console.warn(`⚠️  Angel: symbol "${symbol}" not found on ${exchange}`);
       return [];
     }
     const interval = INTERVAL_MAP[timeframe] || 'FIVE_MINUTE';
@@ -198,7 +512,7 @@ export class AngelOneDataSource {
         method: 'POST',
         headers: this.getHeaders(true),
         body: JSON.stringify({
-          exchange: 'NSE',
+          exchange,
           symboltoken: resolved.symboltoken,
           interval,
           fromdate: fromStr,
@@ -206,10 +520,24 @@ export class AngelOneDataSource {
         }),
       });
       if (res.status === 401 || res.status === 403) {
-        await this.refreshToken();
-        return this.fetchHistoricalCandles(symbol, timeframe, candleCount);
+        if (!retried) {
+          await this.refreshToken();
+          return this.fetchHistoricalCandles(symbol, timeframe, candleCount, exchange, true);
+        }
+        this.session = null;
+        return [];
       }
-      const json = (await res.json()) as { status: boolean; data?: Array<string | number>[] };
+      const raw = await res.text();
+      if (raw.startsWith('Access den') || raw.startsWith('<') || raw.includes('Access Denied')) {
+        if (!retried) {
+          await this.refreshToken();
+          return this.fetchHistoricalCandles(symbol, timeframe, candleCount, exchange, true);
+        }
+        console.warn(`⚠️  Angel getCandleData still Access Denied after retry (${exchange}) — invalidating session`);
+        this.session = null;
+        return [];
+      }
+      const json = JSON.parse(raw) as { status: boolean; data?: Array<string | number>[] };
       if (!json.status || !Array.isArray(json.data)) return [];
       const candles: CandleData[] = json.data
         .map((row) => {
@@ -228,25 +556,39 @@ export class AngelOneDataSource {
   }
 
   /** Fetch live Last Traded Price from Angel One (same as chart). */
-  async fetchLTP(symbol: string): Promise<{ ltp: number; open: number; high: number; low: number; close: number } | null> {
+  async fetchLTP(symbol: string, exchange: 'NSE' | 'NFO' | 'BSE' = 'NSE', retried = false): Promise<{ ltp: number; open: number; high: number; low: number; close: number } | null> {
     if (!(await this.ensureSession())) return null;
-    const resolved = await this.resolveSymbol(symbol);
+    const resolved = await this.resolveSymbolForExchange(symbol, exchange);
     if (!resolved) return null;
     try {
       const res = await fetch(`${ANGEL_BASE}/rest/secure/angelbroking/order/v1/getLtpData`, {
         method: 'POST',
         headers: this.getHeaders(true),
         body: JSON.stringify({
-          exchange: 'NSE',
+          exchange,
           tradingsymbol: resolved.tradingsymbol,
           symboltoken: resolved.symboltoken,
         }),
       });
       if (res.status === 401 || res.status === 403) {
-        await this.refreshToken();
-        return this.fetchLTP(symbol);
+        if (!retried) {
+          await this.refreshToken();
+          return this.fetchLTP(symbol, exchange, true);
+        }
+        this.session = null;
+        return null;
       }
-      const json = (await res.json()) as {
+      const raw = await res.text();
+      if (raw.startsWith('Access den') || raw.startsWith('<') || raw.includes('Access Denied')) {
+        if (!retried) {
+          await this.refreshToken();
+          return this.fetchLTP(symbol, exchange, true);
+        }
+        console.warn(`⚠️  Angel getLtpData still Access Denied after retry (${exchange}) — invalidating session`);
+        this.session = null;
+        return null;
+      }
+      const json = JSON.parse(raw) as {
         status: boolean;
         data?: { ltp: string; open?: string; high?: string; low?: string; close?: string };
       };
@@ -263,21 +605,21 @@ export class AngelOneDataSource {
     }
   }
 
-  async fetchTimeframeData(symbol: string, timeframe: string): Promise<PriceData | null> {
-    const candles = await this.fetchHistoricalCandles(symbol, timeframe, 500);
+  async fetchTimeframeData(symbol: string, timeframe: string, exchange: 'NSE' | 'NFO' | 'BSE' = 'NSE'): Promise<PriceData | null> {
+    const candles = await this.fetchHistoricalCandles(symbol, timeframe, 500, exchange);
     if (candles.length === 0) return null;
     const latestCandle = candles[candles.length - 1]!;
     const previousCandle = candles.length > 1 ? candles[candles.length - 2]! : latestCandle;
 
     // Use live LTP so displayed price matches Angel One chart; fallback to last candle close
-    const ltpData = await this.fetchLTP(symbol);
+    const ltpData = await this.fetchLTP(symbol, exchange);
     const price = ltpData ? ltpData.ltp : latestCandle.close;
     const change = price - previousCandle.close;
     const changePercent = previousCandle.close !== 0 ? (change / previousCandle.close) * 100 : 0;
 
     const market: MarketInfo = {
-      name: 'NSE',
-      exchange: 'NSE',
+      name: exchange,
+      exchange,
       timezone: 'Asia/Kolkata',
       currency: 'INR',
       country: 'India',
@@ -299,34 +641,204 @@ export class AngelOneDataSource {
     };
   }
 
-  async searchSymbols(query: string): Promise<SearchResult[]> {
-    if (!query || query.length < 1) return [];
+  /**
+   * Margin Calculator API (SmartAPI docs: https://smartapi.angelbroking.com/docs/MarginCalculator).
+   * Uses mode "FULL" with exchangeTokens for NSE, BSE and NFO to include all tokens in the response.
+   * NFO = Futures & Options (tokens are per contract, not the same as equity tokens).
+   */
+  async fetchMarginCalculator(exchangeTokens: {
+    NSE?: string[];
+    BSE?: string[];
+    NFO?: string[];
+  }, retried = false): Promise<{ status: boolean; data?: unknown; message?: string }> {
     await this.ensureSession();
+    const nse = exchangeTokens.NSE?.filter(Boolean) ?? [];
+    const bse = exchangeTokens.BSE?.filter(Boolean) ?? [];
+    const nfo = exchangeTokens.NFO?.filter(Boolean) ?? [];
+    if (nse.length === 0 && bse.length === 0 && nfo.length === 0) {
+      return { status: false, message: 'At least one token for NSE, BSE or NFO is required' };
+    }
+    const body: { mode: string; exchangeTokens: Record<string, string[]> } = {
+      mode: 'FULL',
+      exchangeTokens: {},
+    };
+    if (nse.length) body.exchangeTokens['NSE'] = nse;
+    if (bse.length) body.exchangeTokens['BSE'] = bse;
+    if (nfo.length) body.exchangeTokens['NFO'] = nfo;
     try {
-      const res = await fetch(`${ANGEL_BASE}/rest/secure/angelbroking/order/v1/searchScrip`, {
+      const res = await fetch(`${ANGEL_BASE}/rest/secure/angelbroking/margin/v1/batch`, {
         method: 'POST',
         headers: this.getHeaders(true),
-        body: JSON.stringify({ exchange: 'NSE', searchscrip: query.toUpperCase().trim() }),
+        body: JSON.stringify(body),
       });
       if (res.status === 401 || res.status === 403) {
-        await this.refreshToken();
-        return this.searchSymbols(query);
+        if (!retried) {
+          await this.refreshToken();
+          return this.fetchMarginCalculator(exchangeTokens, true);
+        }
+        this.session = null;
+        return { status: false, message: 'Auth failed after retry' };
       }
-      const json = (await res.json()) as { status: boolean; data?: Array<{ symboltoken: string; tradingsymbol: string }> };
-      if (!json.status || !Array.isArray(json.data)) return [];
-      return json.data
-        .filter((r) => r.tradingsymbol?.endsWith('-EQ'))
-        .slice(0, 20)
-        .map((r) => ({
-          symbol: r.tradingsymbol.replace(/-EQ$/, ''),
-          name: `${r.tradingsymbol.replace(/-EQ$/, '')} (NSE)`,
-          exchange: 'NSE',
-          currency: 'INR',
-          country: 'India',
-          type: 'Equity',
-        }));
+      const raw = await res.text();
+      if (raw.startsWith('Access den') || raw.startsWith('<') || raw.includes('Access Denied')) {
+        if (!retried) {
+          await this.refreshToken();
+          return this.fetchMarginCalculator(exchangeTokens, true);
+        }
+        this.session = null;
+        return { status: false, message: 'Access Denied after retry' };
+      }
+      const json = JSON.parse(raw) as { status: boolean; data?: unknown; message?: string };
+      return json;
     } catch (e: any) {
-      console.error('Angel searchSymbols error:', e?.message);
+      console.error('Angel margin calculator error:', e?.message);
+      return { status: false, message: e?.message ?? 'Margin calculator request failed' };
+    }
+  }
+
+  /** Resolve symbol to NSE + BSE tokens and call Margin Calculator with mode FULL (all tokens). */
+  async fetchMarginForSymbol(symbol: string): Promise<{ status: boolean; data?: unknown; message?: string }> {
+    const { nse, bse } = await this.resolveSymbolNSEAndBSE(symbol);
+    const exchangeTokens: { NSE?: string[]; BSE?: string[] } = {};
+    if (nse?.symboltoken) exchangeTokens.NSE = [nse.symboltoken];
+    if (bse?.symboltoken) exchangeTokens.BSE = [bse.symboltoken];
+    if (!exchangeTokens.NSE?.length && !exchangeTokens.BSE?.length) {
+      return { status: false, message: `Symbol "${symbol}" not found on NSE or BSE` };
+    }
+    return this.fetchMarginCalculator(exchangeTokens);
+  }
+
+  async searchSymbols(query: string, exchangeFilter?: 'ALL' | 'NSE' | 'NFO' | 'BSE'): Promise<SearchResult[]> {
+    console.log('[angelOne.searchSymbols] query:', JSON.stringify(query), 'exchangeFilter:', exchangeFilter ?? 'ALL');
+    if (!query || query.length < 1) {
+      console.log('[angelOne.searchSymbols] Early return: empty query');
+      return [];
+    }
+    await this.ensureSession();
+    const searchscrip = query.toUpperCase().trim();
+    const results: SearchResult[] = [];
+    const seen = new Set<string>();
+    const exchangesToSearch: ('NSE' | 'NFO' | 'BSE')[] =
+      exchangeFilter && exchangeFilter !== 'ALL'
+        ? [exchangeFilter]
+        : ['NSE', 'NFO', 'BSE'];
+
+    const searchOne = async (exchange: string): Promise<{ status: boolean; data?: Array<{ symboltoken?: string; tradingsymbol?: string }> }> => {
+      try {
+        return await this.searchScripApi(exchange, searchscrip);
+      } catch (authErr: any) {
+        if (authErr?.message === 'Auth') {
+          await this.refreshToken();
+          try {
+            return await this.searchScripApi(exchange, searchscrip);
+          } catch (retryErr: any) {
+            if (retryErr?.message === 'Auth') {
+              console.log('[angelOne.searchSymbols]', exchange, 'still Auth after refresh, skipping');
+            }
+            return { status: false };
+          }
+        }
+        return { status: false };
+      }
+    };
+
+    try {
+      const resMap = await Promise.all(exchangesToSearch.map((ex) => searchOne(ex).then((r) => ({ ex, r }))));
+      const nseRes = exchangesToSearch.includes('NSE') ? resMap.find((x) => x.ex === 'NSE')?.r : { status: false };
+      const nfoRes = exchangesToSearch.includes('NFO') ? resMap.find((x) => x.ex === 'NFO')?.r : { status: false };
+      const bseRes = exchangesToSearch.includes('BSE') ? resMap.find((x) => x.ex === 'BSE')?.r : { status: false };
+
+      // NSE: equity (-EQ) first, then indices/other
+      if (nseRes?.status && Array.isArray(nseRes.data)) {
+        for (const r of nseRes.data) {
+          if (!r.tradingsymbol) continue;
+          if (r.tradingsymbol.endsWith('-EQ')) {
+            const symbol = r.tradingsymbol.replace(/-EQ$/, '');
+            const key = `NSE:${symbol}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            results.push({
+              symbol,
+              name: `${symbol} (NSE Equity)`,
+              exchange: 'NSE',
+              currency: 'INR',
+              country: 'India',
+              type: 'Equity',
+            });
+          }
+        }
+        for (const r of nseRes.data) {
+          if (!r.tradingsymbol || r.tradingsymbol.endsWith('-EQ')) continue;
+          const key = `NSE:${r.tradingsymbol}-${r.symboltoken ?? ''}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          results.push({
+            symbol: r.tradingsymbol,
+            name: `${r.tradingsymbol} (NSE)`,
+            exchange: 'NSE',
+            currency: 'INR',
+            country: 'India',
+            type: 'Index',
+          });
+        }
+      }
+
+      // NFO: futures and options (BANK NIFTY, NIFTY, etc.)
+      if (nfoRes?.status && Array.isArray(nfoRes.data)) {
+        for (const r of nfoRes.data) {
+          if (!r.tradingsymbol) continue;
+          const key = `NFO:${r.tradingsymbol}-${r.symboltoken ?? ''}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const t = r.tradingsymbol;
+          const isFut = t.includes('FUT');
+          const isCE = t.endsWith('CE');
+          const isPE = t.endsWith('PE');
+          let type = 'Derivative';
+          if (isFut) type = 'Future';
+          else if (isCE || isPE) type = 'Option';
+          results.push({
+            symbol: t,
+            name: `${t} (NFO ${type})`,
+            exchange: 'NFO',
+            currency: 'INR',
+            country: 'India',
+            type,
+          });
+        }
+      }
+
+      // BSE: equity
+      if (bseRes?.status && Array.isArray(bseRes.data)) {
+        for (const r of bseRes.data) {
+          if (!r.tradingsymbol) continue;
+          const key = `BSE:${r.tradingsymbol}-${r.symboltoken ?? ''}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const symbol = r.tradingsymbol.replace(/-EQ$/, '') || r.tradingsymbol;
+          results.push({
+            symbol: r.tradingsymbol,
+            name: `${symbol} (BSE)`,
+            exchange: 'BSE',
+            currency: 'INR',
+            country: 'India',
+            type: 'Equity',
+          });
+        }
+      }
+
+      let out = results.slice(0, 30);
+      if (out.length === 0) {
+        const fallback = await this.searchSymbolsFromScripMaster(searchscrip, exchangeFilter);
+        if (fallback.length > 0) {
+          console.log('[angelOne.searchSymbols] Using scrip master fallback:', fallback.length, 'results');
+          out = fallback;
+        }
+      }
+      console.log('[angelOne.searchSymbols] Returning', out.length, 'results (NSE/NFO/BSE):', out.map((r) => `${r.exchange}:${r.symbol}`).slice(0, 8));
+      return out;
+    } catch (e: any) {
+      console.error('[angelOne.searchSymbols] Error:', e?.message, e);
       return [];
     }
   }

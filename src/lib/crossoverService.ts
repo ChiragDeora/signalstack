@@ -121,7 +121,7 @@ export class CrossoverService {
     try {
       this.emitStatus(config.symbol, config.timeframe, 'warming_up', 'Loading historical candles...');
 
-      const priceData = await this.dataSource.fetchTimeframeData(config.symbol, config.timeframe);
+      const priceData = await this.dataSource.fetchTimeframeData(config.symbol, config.timeframe, (config.exchange as 'NSE' | 'NFO' | 'BSE') || 'NSE');
 
       if (priceData?.candleData && priceData.candleData.length > 0) {
         this.engine.warmUp(config.symbol, config.timeframe, priceData.candleData, config.userId);
@@ -215,7 +215,7 @@ export class CrossoverService {
    */
   private async pollAndProcess(config: WatchConfig): Promise<void> {
     try {
-      const priceData = await this.dataSource.fetchTimeframeData(config.symbol, config.timeframe);
+      const priceData = await this.dataSource.fetchTimeframeData(config.symbol, config.timeframe, (config.exchange as 'NSE' | 'NFO' | 'BSE') || 'NSE');
       if (!priceData) return;
 
       // Emit price update

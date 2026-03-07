@@ -31,6 +31,7 @@ interface MonitoredSymbol {
   symbol: string;
   name?: string;
   currency: string;
+  exchange?: string; // NSE | NFO | BSE — used for polling/fetch so the correct exchange is queried
 }
 
 interface AlertData {
@@ -125,6 +126,7 @@ export default function EMAAlertSystem() {
   const [warmupByKey, setWarmupByKey] = useState<Record<string, Record<number, number>>>({});
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searchExchangeFilter, setSearchExchangeFilter] = useState<'ALL' | 'NSE' | 'NFO' | 'BSE'>('ALL');
   const [showSearch, setShowSearch] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
   const [emasBySymbol, setEmasBySymbol] = useState<Record<string, EMA[]>>({});
@@ -206,7 +208,7 @@ export default function EMAAlertSystem() {
     hasRestoredRef.current = true;
     const saved = loadPersistedConfig();
     if (saved && saved.symbols.length > 0) {
-      setSymbols(saved.symbols);
+      setSymbols((saved.symbols || []).map((s) => ({ ...s, exchange: s.exchange || 'NSE' })));
       setTimeframeBySymbol(saved.timeframeBySymbol);
       setEmasBySymbol(saved.emasBySymbol);
       setTrackBullish(saved.trackBullish);
@@ -423,21 +425,28 @@ export default function EMAAlertSystem() {
   // ===================================
   // SEARCH
   // ===================================
-  const searchStocks = useCallback(async (query: string) => {
+  const searchStocks = useCallback(async (query: string, exchangeFilter?: 'ALL' | 'NSE' | 'NFO' | 'BSE') => {
     if (!query || query.length < 1) { setSearchResults([]); setShowSearch(false); return; }
+    const filter = exchangeFilter ?? searchExchangeFilter;
+    console.log('[EMAAlertSystem] searchStocks called, query:', query, 'exchange:', filter);
     setIsSearching(true);
     try {
-      const res = await axios.post('/api/search-symbols', { query });
+      const res = await axios.post('/api/search-symbols', { query, exchangeFilter: filter });
+      console.log('[EMAAlertSystem] search-symbols response:', res.data?.success, 'count:', res.data?.results?.length);
       if (res.data.success) { setSearchResults(res.data.results); setShowSearch(true); }
-    } catch { setSearchResults([]); } finally { setIsSearching(false); }
-  }, []);
+      else setSearchResults([]);
+    } catch (err: any) {
+      console.error('[EMAAlertSystem] search-symbols request failed:', err?.message, err?.response?.data);
+      setSearchResults([]);
+    } finally { setIsSearching(false); }
+  }, [searchExchangeFilter]);
 
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const debouncedSearch = useCallback((query: string) => {
     if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
     if (!query) { setSearchResults([]); setShowSearch(false); return; }
-    searchDebounceRef.current = setTimeout(() => searchStocks(query), 400);
-  }, [searchStocks]);
+    searchDebounceRef.current = setTimeout(() => searchStocks(query, searchExchangeFilter), 400);
+  }, [searchStocks, searchExchangeFilter]);
 
   const addSymbol = async (result: SearchResult) => {
     if (symbols.some((s) => s.symbol.toUpperCase() === result.symbol.toUpperCase())) {
@@ -449,6 +458,7 @@ export default function EMAAlertSystem() {
       symbol: result.symbol,
       name: result.name,
       currency: result.currency || 'INR',
+      exchange: result.exchange || 'NSE',
     };
     setSymbols((prev) => [...prev, newEntry]);
     setTimeframeBySymbol((prev) => ({ ...prev, [result.symbol]: DEFAULT_TIMEFRAME }));
@@ -502,11 +512,17 @@ export default function EMAAlertSystem() {
     setWarmupByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
   };
 
-  const fetchPrice = useCallback(async (sym: string, tf: string) => {
+  const getExchange = useCallback((sym: string): string => {
+    const s = symbols.find((x) => x.symbol === sym);
+    return s?.exchange || 'NSE';
+  }, [symbols]);
+
+  const fetchPrice = useCallback(async (sym: string, tf: string, exchange?: string) => {
     if (!sym) return;
+    const exch = exchange ?? getExchange(sym);
     setIsFetchingPrice(true);
     try {
-      const res = await axios.post('/api/fetch-price', { symbol: sym, timeframe: tf });
+      const res = await axios.post('/api/fetch-price', { symbol: sym, timeframe: tf, exchange: exch });
       if (res.data.success && res.data.data) {
         const key = watchKey(sym, tf);
         setPriceByKey((prev) => ({
@@ -541,7 +557,7 @@ export default function EMAAlertSystem() {
     lastFetchedRef.current = timeframeFetchKey;
     const list = symbolsRef.current;
     const tfBySym = timeframeBySymbolRef.current;
-    list.forEach((s) => fetchPrice(s.symbol, tfBySym[s.symbol] ?? DEFAULT_TIMEFRAME));
+    list.forEach((s) => fetchPrice(s.symbol, tfBySym[s.symbol] ?? DEFAULT_TIMEFRAME, s.exchange));
   }, [timeframeFetchKey, symbolKeys, fetchPrice]);
 
   // ===================================
@@ -585,7 +601,7 @@ export default function EMAAlertSystem() {
         emaPeriods: symbolEmas.map((e) => e.period),
         trackBullish,
         trackBearish,
-        exchange: 'NSE',
+        exchange: s.exchange || 'NSE',
         currency: s.currency,
       });
       if (res.data.success) {
@@ -598,7 +614,7 @@ export default function EMAAlertSystem() {
             emaPeriods: symbolEmas.map((e) => e.period),
             trackBullish,
             trackBearish,
-            exchange: 'NSE',
+            exchange: s.exchange || 'NSE',
             currency: s.currency,
           }).catch(() => {});
         }
@@ -634,7 +650,7 @@ export default function EMAAlertSystem() {
           emaPeriods,
           trackBullish,
           trackBearish,
-          exchange: 'NSE',
+          exchange: s.exchange || 'NSE',
           currency: s.currency,
         });
         if (!res.data.success) {
@@ -648,7 +664,7 @@ export default function EMAAlertSystem() {
           emaPeriods,
           trackBullish,
           trackBearish,
-          exchange: 'NSE',
+          exchange: s.exchange || 'NSE',
           currency: s.currency,
         });
       }
@@ -754,6 +770,21 @@ export default function EMAAlertSystem() {
       console.error('Push subscription failed:', err);
     }
   };
+
+  const disablePush = useCallback(async () => {
+    if (!window.confirm('Confirm you want to turn alerts off? You will stop receiving push and in-app crossover alerts until you enable them again.')) return;
+    setPushEnabled(false);
+    try {
+      const registration = await navigator.serviceWorker?.ready;
+      const subscription = await registration?.pushManager?.getSubscription();
+      if (subscription?.endpoint) {
+        await axios.delete('/api/push-subscribe', { data: { endpoint: subscription.endpoint } });
+        await subscription.unsubscribe();
+      }
+    } catch (err) {
+      console.error('Push unsubscribe failed:', err);
+    }
+  }, []);
 
   const sendTestEmail = async () => {
     setTestEmailStatus('sending');
@@ -935,13 +966,16 @@ export default function EMAAlertSystem() {
                       <span>Enable alerts</span>
                     </button>
                   ) : (
-                    <span
-                      className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-emerald-500/30 text-emerald-400/90 flex items-center gap-1.5 flex-shrink-0"
-                      title="You'll get crossover alerts here and by email"
+                    <button
+                      type="button"
+                      onClick={disablePush}
+                      className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-emerald-500/30 text-emerald-400/90 flex items-center gap-1.5 flex-shrink-0 hover:bg-emerald-500/10 transition-colors cursor-pointer"
+                      title="Click to turn alerts off"
+                      aria-label="Alerts on – click to turn off"
                     >
                       <Bell className="w-3.5 h-3.5" />
                       Alerts on
-                    </span>
+                    </button>
                   )}
                   <button
                     onClick={() => sendTestPush(0)}
@@ -1013,48 +1047,77 @@ export default function EMAAlertSystem() {
           </div>
         )}
 
-        {/* ─── SEARCH BAR ─── */}
+        {/* ─── SEARCH BAR + EXCHANGE FILTER ─── */}
         <div className="card mb-4 !p-4" ref={searchContainerRef}>
+          <div className="flex flex-col sm:flex-row gap-3 sm:gap-2 sm:items-center">
+            <div className="relative min-w-0 w-full sm:w-[75%]">
+              <input
+                ref={searchInputRef}
+                type="text"
+                value={searchQuery}
+                onChange={(e) => { setSearchQuery(e.target.value); debouncedSearch(e.target.value); }}
+                onFocus={() => { if (searchResults.length > 0) setShowSearch(true); }}
+                onBlur={() => { setTimeout(() => setShowSearch(false), 180); }}
+                className="input-field !py-3 text-base font-semibold pr-10 w-full"
+                placeholder="Search symbols (e.g. RELIANCE)"
+                aria-autocomplete="list"
+                aria-controls={showSearch && searchResults.length > 0 ? 'search-results-listbox' : undefined}
+              />
+              <Search className={`absolute right-4 top-1/2 -translate-y-1/2 w-5 h-5 pointer-events-none ${isSearching ? 'animate-spin' : ''}`} style={{ color: 'var(--text-muted)' }} />
+            </div>
+            <div className="flex flex-row items-center gap-2 w-full sm:w-[25%] min-w-0">
+              <label htmlFor="search-exchange-filter" className="text-[10px] sm:text-xs font-medium uppercase tracking-wide flex-shrink-0 whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
+                Exchange
+              </label>
+              <select
+                id="search-exchange-filter"
+                value={searchExchangeFilter}
+                onChange={(e) => { const v = e.target.value as 'ALL' | 'NSE' | 'NFO' | 'BSE'; setSearchExchangeFilter(v); if (searchQuery.trim()) debouncedSearch(searchQuery); }}
+                className="input-field !py-2.5 sm:!py-3 text-sm font-medium rounded-lg cursor-pointer w-full min-w-0 flex-1"
+                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-primary)' }}
+                title="Filter search results by exchange (All, NSE, NFO, BSE)"
+                aria-label="Filter search by exchange"
+              >
+                <option value="ALL">All</option>
+                <option value="NSE">NSE</option>
+                <option value="NFO">NFO</option>
+                <option value="BSE">BSE</option>
+              </select>
+            </div>
+          </div>
           <div className="relative">
-            <input
-              ref={searchInputRef}
-              type="text"
-              value={searchQuery}
-              onChange={(e) => { setSearchQuery(e.target.value); debouncedSearch(e.target.value); }}
-              onFocus={() => { if (searchResults.length > 0) setShowSearch(true); }}
-              onBlur={() => { setTimeout(() => setShowSearch(false), 180); }}
-              className="input-field !py-3 text-base font-semibold pr-10 w-full"
-              placeholder="Search symbols (e.g. RELIANCE)"
-              aria-autocomplete="list"
-              aria-controls={showSearch && searchResults.length > 0 ? 'search-results-listbox' : undefined}
-            />
-            <Search className={`absolute right-4 top-1/2 -translate-y-1/2 w-5 h-5 pointer-events-none ${isSearching ? 'animate-spin' : ''}`} style={{ color: 'var(--text-muted)' }} />
 
-            {showSearch && searchResults.length > 0 && (
+            {((showSearch && searchResults.length > 0) || searchQuery.trim().length > 0) && (
               <div id="search-results-listbox" className="absolute top-full left-0 right-0 mt-2 search-drop max-h-64 overflow-y-auto z-50 rounded-xl shadow-xl" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }} role="listbox">
-                {searchResults.map((r, i) => (
-                  <button
-                    key={`${r.symbol}-${r.exchange || ''}-${i}`}
-                    type="button"
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => addSymbol(r)}
-                    className="w-full px-4 py-3 text-left transition-colors first:rounded-t-xl last:rounded-b-xl hover:bg-white/5"
-                    style={{ borderBottom: '1px solid var(--border-subtle)' }}
-                    role="option"
-                    aria-selected={false}
-                  >
-                    <div className="flex justify-between items-center">
-                      <div>
-                        <span className="font-bold text-sm" style={{ color: 'var(--accent)' }}>{r.symbol}</span>
-                        <span className="text-sm ml-2" style={{ color: 'var(--text-secondary)' }}>{r.name}</span>
+                {searchResults.length > 0 ? (
+                  searchResults.map((r, i) => (
+                    <button
+                      key={`${r.symbol}-${r.exchange || ''}-${i}`}
+                      type="button"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => addSymbol(r)}
+                      className="w-full px-4 py-3 text-left transition-colors first:rounded-t-xl last:rounded-b-xl hover:bg-white/5"
+                      style={{ borderBottom: '1px solid var(--border-subtle)' }}
+                      role="option"
+                      aria-selected={false}
+                    >
+                      <div className="flex justify-between items-center">
+                        <div>
+                          <span className="font-bold text-sm" style={{ color: 'var(--accent)' }}>{r.symbol}</span>
+                          <span className="text-sm ml-2" style={{ color: 'var(--text-secondary)' }}>{r.name}</span>
+                        </div>
+                        <div className="text-right">
+                          <span className="text-xs font-medium" style={{ color: 'var(--amber)' }}>{r.exchange}</span>
+                          <span className="text-xs ml-2" style={{ color: 'var(--text-muted)' }}>{r.currency}</span>
+                        </div>
                       </div>
-                      <div className="text-right">
-                        <span className="text-xs font-medium" style={{ color: 'var(--amber)' }}>{r.exchange}</span>
-                        <span className="text-xs ml-2" style={{ color: 'var(--text-muted)' }}>{r.currency}</span>
-                      </div>
-                    </div>
-                  </button>
-                ))}
+                    </button>
+                  ))
+                ) : (
+                  <div className="px-4 py-4 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
+                    {isSearching ? 'Searching…' : 'No symbols found. Try e.g. RELIANCE or NIFTY 50.'}
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -1078,6 +1141,9 @@ export default function EMAAlertSystem() {
                 }}
               >
                 <span className="truncate">{s.symbol}</span>
+                {(s.exchange && s.exchange !== 'NSE') && (
+                  <span className="text-xs font-medium opacity-80 flex-shrink-0" style={{ color: 'var(--amber)' }}>({s.exchange})</span>
+                )}
                 {!monitoredSymbols.has(s.symbol) && (
                   <button
                     type="button"

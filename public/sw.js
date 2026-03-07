@@ -33,17 +33,17 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
-// Fetch: network-first strategy (app relies on live data)
+// Fetch: network-first for same-origin only (avoid intercepting Clerk, img.clerk.com, etc.)
 self.addEventListener('fetch', (event) => {
-  // Skip non-GET and API/socket requests
   if (event.request.method !== 'GET') return;
   const url = new URL(event.request.url);
+  // Only handle same-origin: don't intercept cross-origin (e.g. img.clerk.com) to avoid CSP and Response errors
+  if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/socket.io/')) return;
 
   event.respondWith(
     fetch(event.request)
       .then((response) => {
-        // Cache successful responses for offline fallback
         if (response.ok) {
           const clone = response.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
@@ -51,8 +51,9 @@ self.addEventListener('fetch', (event) => {
         return response;
       })
       .catch(() => {
-        // Fallback to cache when offline
-        return caches.match(event.request);
+        return caches.match(event.request).then((cached) => {
+          return cached || new Response('', { status: 503, statusText: 'Offline' });
+        });
       })
   );
 });

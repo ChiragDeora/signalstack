@@ -4,7 +4,7 @@ import { UniversalMarketDataSource } from '@/lib/dynamicMarketSource';
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { symbol, timeframe = '5m', exchange = 'NSE' } = body;
+    const { symbol, exchange = 'NSE' } = body;
 
     if (!symbol || typeof symbol !== 'string') {
       return NextResponse.json({ success: false, error: 'Symbol is required' }, { status: 400 });
@@ -18,22 +18,24 @@ export async function POST(req: NextRequest) {
       process.env.NEXT_PUBLIC_FINNHUB_API_KEY,
     );
 
-    const priceData = await dataSource.fetchTimeframeData(cleanSymbol, timeframe, exch);
+    const ltpData = await dataSource.fetchLTP(cleanSymbol, exch);
 
-    if (priceData) {
+    if (ltpData) {
       return NextResponse.json({
         success: true,
-        data: priceData,
+        data: ltpData,
+        symbol: cleanSymbol,
+        exchange: exch,
         timestamp: new Date().toISOString(),
       });
     }
 
     return NextResponse.json({
       success: false,
-      error: `No data available for ${cleanSymbol}`,
+      error: `No LTP data for ${cleanSymbol} on ${exch}`,
     }, { status: 200 });
   } catch (error) {
-    console.error('❌ fetch-price error:', error);
+    console.error('❌ ltp route error:', error);
     return NextResponse.json(
       { success: false, error: 'Internal server error' },
       { status: 500 },
