@@ -13,10 +13,7 @@ export async function POST(req: NextRequest) {
     const cleanSymbol = symbol.trim().toUpperCase();
     const exch = ['NSE', 'NFO', 'BSE'].includes(String(exchange)) ? (exchange as 'NSE' | 'NFO' | 'BSE') : 'NSE';
 
-    const dataSource = new UniversalMarketDataSource(
-      process.env.ALPHA_VANTAGE_API_KEY,
-      process.env.NEXT_PUBLIC_FINNHUB_API_KEY,
-    );
+    const dataSource = new UniversalMarketDataSource();
 
     const ltpData = await dataSource.fetchLTP(cleanSymbol, exch);
 

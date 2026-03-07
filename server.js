@@ -2,7 +2,9 @@ const express = require('express');
 const { createServer } = require('http');
 const { Server } = require('socket.io');
 const next = require('next');
+const path = require('path');
 require('dotenv').config();
+require('dotenv').config({ path: path.resolve(process.cwd(), '.env.local') });
 
 const dev = process.env.NODE_ENV !== 'production';
 const app = next({ dev });

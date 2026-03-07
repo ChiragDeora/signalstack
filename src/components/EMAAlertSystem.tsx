@@ -574,13 +574,25 @@ export default function EMAAlertSystem() {
     }));
     setNewEmaPeriod('');
     setShowAddEma(false);
+    if (monitoredSymbols.has(displaySymbol)) {
+      stopMonitoringForSymbol(displaySymbol);
+      setMonitorStatus('Monitoring stopped — start again to apply EMA change');
+      setTimeout(() => setMonitorStatus(''), 4000);
+    }
   };
   const removeEma = (id: number) => {
     if (!displaySymbol) return;
+    const current = emasBySymbol[displaySymbol] ?? [];
+    const nextEmas = current.filter((e) => e.id !== id);
     setEmasBySymbol((prev) => ({
       ...prev,
-      [displaySymbol]: (prev[displaySymbol] ?? []).filter((e) => e.id !== id),
+      [displaySymbol]: nextEmas,
     }));
+    if (monitoredSymbols.has(displaySymbol)) {
+      stopMonitoringForSymbol(displaySymbol);
+      setMonitorStatus('Monitoring stopped — start again to apply EMA change');
+      setTimeout(() => setMonitorStatus(''), 4000);
+    }
   };
 
   const startMonitoringForSymbol = async (sym: string) => {
@@ -615,6 +627,24 @@ export default function EMAAlertSystem() {
       console.error(err);
     }
   };
+
+  /** Stop all monitoring (e.g. after bullish/bearish change). Only Add symbol does not stop. */
+  const stopAllMonitoringFromConfigChange = useCallback(() => {
+    if (monitoredSymbols.size === 0) return;
+    const toStop = new Set(monitoredSymbols);
+    toStop.forEach((sym) => {
+      const tf = getTimeframe(sym);
+      axios.delete('/api/monitor', { data: { symbol: sym, timeframe: tf } }).catch(() => {});
+      const key = watchKey(sym, tf);
+      setPriceByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
+      setEmaByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
+      setWarmupByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
+    });
+    setMonitoredSymbols(new Set());
+    if (userId) refetchWatches();
+    setMonitorStatus('Monitoring stopped — start again to apply alert settings');
+    setTimeout(() => setMonitorStatus(''), 4000);
+  }, [monitoredSymbols, getTimeframe, userId]);
 
   const _startMonitoring = async () => {
     if (symbols.length === 0) {
@@ -1151,13 +1181,13 @@ export default function EMAAlertSystem() {
             ))}
             <button
               type="button"
-              onClick={() => { searchInputRef.current?.focus(); setShowSearch(searchResults.length > 0); }}
+              onClick={() => { setShowSearch(true); queueMicrotask(() => searchInputRef.current?.focus()); }}
               className="flex items-center gap-2 px-4 py-3.5 min-h-[48px] text-sm font-semibold transition-colors border-b-2 flex-shrink-0 touch-manipulation"
               style={{ color: 'var(--accent)', borderBottomColor: 'transparent', background: 'transparent' }}
-              title="Add a new symbol to monitor"
+              title="Open new symbol tab (like a new browser tab)"
             >
               <Plus className="w-4 h-4" />
-              <span>Add</span>
+              <span>New</span>
             </button>
             <button
               type="button"
@@ -1179,7 +1209,27 @@ export default function EMAAlertSystem() {
               {TIMEFRAMES.map((tf) => (
                 <button
                   key={tf.id}
-                  onClick={() => displaySymbol && setTimeframeBySymbol((prev) => ({ ...prev, [displaySymbol]: tf.id }))}
+                  onClick={() => {
+                    if (!displaySymbol) return;
+                    const oldTf = getTimeframe(displaySymbol);
+                    const isMonitored = monitoredSymbols.has(displaySymbol);
+                    if (isMonitored && oldTf !== tf.id) {
+                      axios.delete('/api/monitor', { data: { symbol: displaySymbol, timeframe: oldTf } }).catch(() => {});
+                      setMonitoredSymbols((prev) => {
+                        const next = new Set(prev);
+                        next.delete(displaySymbol);
+                        return next;
+                      });
+                      if (userId) refetchWatches();
+                      const oldKey = watchKey(displaySymbol, oldTf);
+                      setPriceByKey((prev) => { const n = { ...prev }; delete n[oldKey]; return n; });
+                      setEmaByKey((prev) => { const n = { ...prev }; delete n[oldKey]; return n; });
+                      setWarmupByKey((prev) => { const n = { ...prev }; delete n[oldKey]; return n; });
+                      setMonitorStatus(`Monitoring stopped — start again to use ${tf.id}`);
+                      setTimeout(() => setMonitorStatus(''), 4000);
+                    }
+                    setTimeframeBySymbol((prev) => ({ ...prev, [displaySymbol]: tf.id }));
+                  }}
                   disabled={!displaySymbol}
                   className={`tf-btn !px-3 sm:!px-4 !py-2.5 min-h-[44px] text-sm flex-shrink-0 touch-manipulation ${displayTimeframe === tf.id ? 'active' : ''}`}
                 >
@@ -1308,7 +1358,10 @@ export default function EMAAlertSystem() {
               <div className="flex gap-2 mb-4">
                 <button
                   type="button"
-                  onClick={() => setTrackBullish(!trackBullish)}
+                  onClick={() => {
+                    setTrackBullish(!trackBullish);
+                    stopAllMonitoringFromConfigChange();
+                  }}
                   className={`toggle-btn text-sm min-h-[48px] touch-manipulation ${trackBullish ? 'bull-on' : ''}`}
                   aria-pressed={trackBullish}
                   aria-label={trackBullish ? 'Alert on bullish crossovers (on)' : 'Alert on bullish crossovers (off)'}
@@ -1318,7 +1371,10 @@ export default function EMAAlertSystem() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setTrackBearish(!trackBearish)}
+                  onClick={() => {
+                    setTrackBearish(!trackBearish);
+                    stopAllMonitoringFromConfigChange();
+                  }}
                   className={`toggle-btn text-sm min-h-[48px] touch-manipulation ${trackBearish ? 'bear-on' : ''}`}
                   aria-pressed={trackBearish}
                   aria-label={trackBearish ? 'Alert on bearish crossovers (on)' : 'Alert on bearish crossovers (off)'}

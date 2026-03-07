@@ -8,13 +8,7 @@ import { AngelOneDataSource, getAngelOneSource } from './angelOneSource';
 export class UniversalMarketDataSource {
   private angelSource: AngelOneDataSource;
 
-  constructor(
-    _alphaVantageApiKey?: string,
-    _finnhubApiKey?: string,
-    _breezeSource?: unknown,
-    _dhanSource?: unknown,
-    angelSource?: AngelOneDataSource,
-  ) {
+  constructor(angelSource?: AngelOneDataSource) {
     this.angelSource = angelSource || getAngelOneSource();
   }
 

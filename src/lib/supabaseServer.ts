@@ -10,9 +10,19 @@ const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 let client: SupabaseClient | null = null;
+let loggedMissing = false;
 
 export function getSupabaseAdmin(): SupabaseClient | null {
-  if (!url || !serviceRoleKey) return null;
+  if (!url || !serviceRoleKey) {
+    if (!loggedMissing) {
+      loggedMissing = true;
+      const missing = [];
+      if (!url) missing.push('NEXT_PUBLIC_SUPABASE_URL');
+      if (!serviceRoleKey) missing.push('SUPABASE_SERVICE_ROLE_KEY');
+      console.error('[supabaseServer] Supabase not configured. Add to .env or .env.local:', missing.join(', '));
+    }
+    return null;
+  }
   if (!client) client = createClient(url, serviceRoleKey);
   return client;
 }

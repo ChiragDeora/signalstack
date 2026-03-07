@@ -13,10 +13,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: 'Search query is required' }, { status: 400 });
     }
 
-    const dataSource = new UniversalMarketDataSource(
-      process.env.ALPHA_VANTAGE_API_KEY,
-      process.env.NEXT_PUBLIC_FINNHUB_API_KEY,
-    );
+    const dataSource = new UniversalMarketDataSource();
 
     const filter = ['ALL', 'NSE', 'NFO', 'BSE'].includes(exchangeFilter) ? exchangeFilter : undefined;
     console.log('[search-symbols] Calling dataSource.searchSymbols:', query, filter);
