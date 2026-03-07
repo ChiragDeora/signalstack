@@ -4,7 +4,7 @@ export default function SignInLayout({
   children: React.ReactNode;
 }) {
   return (
-    <div className="min-h-dvh w-full bg-slate-100 text-slate-900">
+    <div className="min-h-dvh w-full bg-slate-50">
       {children}
     </div>
   );

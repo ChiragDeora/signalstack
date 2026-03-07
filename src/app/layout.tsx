@@ -19,7 +19,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: '#2563eb',
+  themeColor: '#0ea5e9',
   width: 'device-width',
   initialScale: 1,
   maximumScale: 1,
@@ -32,29 +32,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <ClerkProvider
-      appearance={{
-        variables: {
-          colorBackground: '#ffffff',
-          colorInputBackground: '#f1f5f9',
-          colorText: '#0f172a',
-          colorTextSecondary: '#475569',
-          colorInputText: '#0f172a',
-          colorPrimary: '#2563eb',
-          borderRadius: '12px',
-        },
-        elements: {
-          card: 'shadow-xl border border-gray-200 bg-white',
-          cardBox: 'bg-white',
-          header: 'hidden',
-          navbar: 'hidden',
-          navbarMobileMenuRow: 'hidden',
-          formButtonPrimary: 'bg-[#2563eb] text-white',
-          button: 'text-[#0f172a] bg-gray-100 hover:bg-gray-200 border-gray-200',
-          footerActionLink: 'text-[#2563eb]',
-        },
-      }}
-    >
+    <ClerkProvider>
       <html lang="en">
         <head>
           <link rel="manifest" href="/manifest.json" />

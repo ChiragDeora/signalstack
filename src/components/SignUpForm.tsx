@@ -24,35 +24,15 @@ export function SignUpForm() {
 
   if (loaded && isLoaded && isSignedIn) {
     return (
-      <div className="min-h-dvh flex items-center justify-center">
-        <p className="text-slate-600">Redirecting...</p>
+      <div className="min-h-dvh flex items-center justify-center bg-slate-50">
+        <p className="text-slate-500">Redirecting...</p>
       </div>
     );
   }
 
   return (
-    <div className="min-h-dvh flex items-center justify-center safe-area-inset">
+    <div className="min-h-dvh flex items-center justify-center bg-slate-50">
       <SignUp
-        appearance={{
-          variables: {
-            colorPrimary: '#22d3ee',
-            colorBackground: '#080c14',
-            colorInputBackground: '#1e293b',
-            colorText: '#f8fafc',
-            colorTextSecondary: '#cbd5e1',
-            colorInputText: '#f8fafc',
-            borderRadius: '12px',
-          },
-          elements: {
-            rootBox: 'w-full max-w-md mx-auto',
-            card: '!bg-transparent !border-0 !shadow-none',
-            cardBox: '!bg-transparent',
-            header: 'hidden',
-            navbar: 'hidden',
-            formFieldInput: '!bg-[#1e293b] !text-[#f8fafc] !border-[#334155]',
-            formButtonPrimary: '!bg-[#22d3ee] !text-[#080c14]',
-          },
-        }}
         forceRedirectUrl={redirectUrl}
         fallbackRedirectUrl={redirectUrl}
       />

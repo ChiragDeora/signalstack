@@ -885,19 +885,19 @@ export default function EMAAlertSystem() {
   // RENDER
   // ===================================
   return (
-    <div className="min-h-screen text-white overflow-x-hidden safe-area-inset">
+    <div className="min-h-screen overflow-x-hidden safe-area-inset">
       {/* Refresh modal: shown on load until data is ready */}
       {showRefreshModal && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4"
-          style={{ background: 'rgba(0,0,0,0.88)', backdropFilter: 'blur(6px)' }}
+          style={{ background: 'rgba(0,0,0,0.4)', backdropFilter: 'blur(6px)' }}
           aria-modal="true"
           role="alertdialog"
           aria-live="polite"
         >
           <div
-            className="max-w-sm w-full rounded-2xl p-6 text-center shadow-2xl border border-[var(--border)]"
-            style={{ backgroundColor: 'var(--card-bg)' }}
+            className="max-w-sm w-full rounded-2xl p-6 text-center shadow-2xl border border-[var(--border-subtle)]"
+            style={{ backgroundColor: 'var(--bg-card)' }}
           >
             <RefreshCw className="w-10 h-10 mx-auto mb-4 animate-spin opacity-80" style={{ color: 'var(--accent)' }} />
             <h3 className="font-semibold text-base mb-2" style={{ color: 'var(--text-primary)' }}>
@@ -940,12 +940,12 @@ export default function EMAAlertSystem() {
           {/* Row 2: Action buttons — wrap within padded container */}
           <div className="flex flex-wrap items-center gap-2 mt-3 min-w-0">
             <div
-              className={`flex items-center gap-1 sm:gap-1.5 text-xs font-semibold px-2.5 py-2 sm:px-3 rounded-lg border min-h-[44px] flex-shrink-0 ${connected ? 'border-emerald-500/30 text-emerald-400' : 'border-red-500/30 text-red-400'
+              className={`flex items-center gap-1 sm:gap-1.5 text-xs font-semibold px-2.5 py-2 sm:px-3 rounded-lg border min-h-[44px] flex-shrink-0 ${connected ? 'border-green-600/30 text-green-700' : 'border-red-600/30 text-red-700'
                 }`}
               style={{ background: connected ? 'var(--green-bg)' : 'var(--red-bg)' }}
               title={connected ? 'Real-time updates connected' : 'Not connected. Use the deployment where the Node server runs (e.g. Railway URL) for Live updates.'}
             >
-              <span className={`w-2 h-2 rounded-full flex-shrink-0 ${connected ? 'bg-emerald-400 anim-live' : 'bg-red-400'}`} />
+              <span className={`w-2 h-2 rounded-full flex-shrink-0 ${connected ? 'bg-green-500 anim-live' : 'bg-red-500'}`} />
               {connected ? <Wifi className="w-3.5 h-3.5 flex-shrink-0" /> : <WifiOff className="w-3.5 h-3.5 flex-shrink-0" />}
               <span>{connected ? 'Live' : 'Offline'}</span>
             </div>
@@ -972,7 +972,7 @@ export default function EMAAlertSystem() {
             )}
             {mounted && 'serviceWorker' in navigator && (
               pushAvailable === false ? (
-                <span className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-amber-500/30 text-amber-400/90 flex-shrink-0" title="Add VAPID env vars in production to enable alerts">
+                <span className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-amber-600/30 text-amber-700 flex-shrink-0" title="Add VAPID env vars in production to enable alerts">
                   Alerts unavailable
                 </span>
               ) : (
@@ -991,7 +991,7 @@ export default function EMAAlertSystem() {
                     <button
                       type="button"
                       onClick={disablePush}
-                      className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-emerald-500/30 text-emerald-400/90 flex items-center gap-1.5 flex-shrink-0 hover:bg-emerald-500/10 transition-colors cursor-pointer"
+                      className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-green-600/30 text-green-700 flex items-center gap-1.5 flex-shrink-0 hover:bg-green-50 transition-colors cursor-pointer"
                       title="Click to turn alerts off"
                       aria-label="Alerts on – click to turn off"
                     >
@@ -1035,22 +1035,22 @@ export default function EMAAlertSystem() {
         {/* ─── MONITORING BANNER ─── */}
         {isMonitoring && (
           <div className="mb-4 px-4 py-3 rounded-xl flex items-center justify-between flex-wrap gap-2"
-            style={{ background: 'var(--green-bg)', border: '1px solid rgba(52,211,153,0.25)' }}>
+            style={{ background: 'var(--green-bg)', border: '1px solid rgba(22,163,74,0.2)' }}>
             <div className="flex items-center gap-3 min-w-0 flex-wrap">
               <div className="relative flex-shrink-0">
-                <Activity className="w-5 h-5 text-emerald-400" />
+                <Activity className="w-5 h-5 text-green-600" />
                 <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-emerald-400 rounded-full animate-ping" />
               </div>
-              <span className="text-emerald-400/60 text-xs">Per-symbol timeframes — {monitorStatus || 'Monitoring active'}</span>
+              <span className="text-green-600/80 text-xs">Per-symbol timeframes — {monitorStatus || 'Monitoring active'}</span>
               <div className="flex flex-wrap gap-2">
                 {symbols.filter((s) => monitoredSymbols.has(s.symbol)).map((s) => (
-                  <div key={s.symbol} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg" style={{ background: 'rgba(0,0,0,0.15)', border: '1px solid rgba(52,211,153,0.2)' }}>
-                    <span className="font-bold text-emerald-300 text-sm">{s.symbol}</span>
-                    <span className="text-emerald-400/70 text-xs">({getTimeframe(s.symbol)})</span>
+                  <div key={s.symbol} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg" style={{ background: 'var(--green-bg)', border: '1px solid rgba(22,163,74,0.2)' }}>
+                    <span className="font-bold text-green-700 text-sm">{s.symbol}</span>
+                    <span className="text-green-600/80 text-xs">({getTimeframe(s.symbol)})</span>
                     <button
                       type="button"
                       onClick={() => stopMonitoringForSymbol(s.symbol)}
-                      className="p-1 rounded hover:bg-red-500/20 flex items-center justify-center"
+                      className="p-1 rounded hover:bg-red-50 flex items-center justify-center"
                       style={{ color: 'var(--red)' }}
                       title={`Stop monitoring ${s.symbol}`}
                     >
@@ -1062,7 +1062,7 @@ export default function EMAAlertSystem() {
             </div>
             <button onClick={stopMonitoring}
               className="flex-shrink-0 flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold"
-              style={{ background: 'var(--red-bg)', border: '1px solid rgba(251,113,133,0.3)', color: 'var(--red)' }}>
+              style={{ background: 'var(--red-bg)', border: '1px solid rgba(220,38,38,0.2)', color: 'var(--red)' }}>
               <Power className="w-3.5 h-3.5" />
               Stop all
             </button>
@@ -1118,7 +1118,7 @@ export default function EMAAlertSystem() {
                       type="button"
                       onMouseDown={(e) => e.preventDefault()}
                       onClick={() => addSymbol(r)}
-                      className="w-full px-4 py-3 text-left transition-colors first:rounded-t-xl last:rounded-b-xl hover:bg-white/5"
+                      className="w-full px-4 py-3 text-left transition-colors first:rounded-t-xl last:rounded-b-xl hover:bg-slate-100"
                       style={{ borderBottom: '1px solid var(--border-subtle)' }}
                       role="option"
                       aria-selected={false}
@@ -1159,7 +1159,7 @@ export default function EMAAlertSystem() {
                 style={{
                   borderBottomColor: selectedSymbol === s.symbol ? 'var(--accent)' : 'transparent',
                   color: selectedSymbol === s.symbol ? 'var(--accent)' : 'var(--text-secondary)',
-                  background: selectedSymbol === s.symbol ? 'rgba(34,211,238,0.06)' : 'transparent',
+                  background: selectedSymbol === s.symbol ? 'rgba(14,165,233,0.06)' : 'transparent',
                 }}
               >
                 <span className="truncate">{s.symbol}</span>
@@ -1170,7 +1170,7 @@ export default function EMAAlertSystem() {
                   <button
                     type="button"
                     onClick={(e) => { e.stopPropagation(); removeSymbol(s.symbol); }}
-                    className="p-0.5 rounded hover:bg-red-500/10 flex-shrink-0"
+                    className="p-0.5 rounded hover:bg-red-50 flex-shrink-0"
                     style={{ color: 'var(--text-muted)' }}
                     aria-label={`Remove ${s.symbol}`}
                   >
@@ -1192,7 +1192,7 @@ export default function EMAAlertSystem() {
             <button
               type="button"
               onClick={handleReset}
-              className="flex items-center justify-center gap-1.5 px-4 sm:px-5 py-3.5 min-h-[48px] text-sm font-semibold transition-colors hover:bg-white/5 flex-shrink-0 touch-manipulation"
+              className="flex items-center justify-center gap-1.5 px-4 sm:px-5 py-3.5 min-h-[48px] text-sm font-semibold transition-colors hover:bg-slate-100 flex-shrink-0 touch-manipulation"
               style={{ color: 'var(--text-muted)', borderLeft: '1px solid var(--border-subtle)' }}
               title="Stop monitoring and clear live data (keeps symbols and EMA setup)"
             >
@@ -1277,7 +1277,7 @@ export default function EMAAlertSystem() {
                   <BarChart3 className="w-4 h-4 flex-shrink-0" style={{ color: 'var(--accent)' }} />
                   <span className="truncate">EMA Periods {displaySymbol && <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>({displaySymbol})</span>}</span>
                 </div>
-                <span className="badge flex-shrink-0" style={{ background: 'rgba(34,211,238,0.12)', color: 'var(--accent)' }}>{emas.length}</span>
+                <span className="badge flex-shrink-0" style={{ background: 'rgba(14,165,233,0.08)', color: 'var(--accent)' }}>{emas.length}</span>
               </div>
 
               {/* Quick add — horizontal scroll on narrow screens */}
@@ -1303,7 +1303,7 @@ export default function EMAAlertSystem() {
                     className="input-field flex-1 text-sm" placeholder="Custom period" min="1" />
                   <button onClick={() => addEma()} disabled={!newEmaPeriod || parseInt(newEmaPeriod) <= 0}
                     className="px-5 py-2.5 rounded-lg text-sm font-bold transition-all disabled:opacity-30"
-                    style={{ background: 'var(--accent)', color: '#080c14' }}>
+                    style={{ background: 'var(--accent)', color: '#ffffff' }}>
                     Add
                   </button>
                 </div>
@@ -1341,7 +1341,7 @@ export default function EMAAlertSystem() {
                           </div>
                         )}
                       </div>
-                      <button onClick={() => removeEma(ema.id)} className="p-1.5 rounded-lg transition-colors hover:bg-red-500/10 flex-shrink-0"
+                      <button onClick={() => removeEma(ema.id)} className="p-1.5 rounded-lg transition-colors hover:bg-red-50 flex-shrink-0"
                         style={{ color: 'var(--text-muted)' }}
                         onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--red)')}
                         onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-muted)')}>
@@ -1458,7 +1458,7 @@ export default function EMAAlertSystem() {
                         style={{
                           background: 'var(--bg-elevated)',
                           border: isEditing ? '2px solid var(--accent)' : '1px solid var(--border-subtle)',
-                          boxShadow: isEditing ? '0 0 0 2px rgba(34,211,238,0.2)' : undefined,
+                          boxShadow: isEditing ? '0 0 0 2px rgba(14,165,233,0.2)' : undefined,
                         }}
                       >
                         {isEditing ? (
@@ -1495,7 +1495,7 @@ export default function EMAAlertSystem() {
                               </label>
                             </div>
                             <div className="flex gap-2">
-                              <button onClick={(e) => { e.stopPropagation(); saveEdit(); }} className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold" style={{ background: 'var(--accent)', color: '#080c14' }}>
+                              <button onClick={(e) => { e.stopPropagation(); saveEdit(); }} className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold" style={{ background: 'var(--accent)', color: '#ffffff' }}>
                                 <Check className="w-3.5 h-3.5" /> Save
                               </button>
                               <button onClick={(e) => { e.stopPropagation(); cancelEdit(); }} className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-medium)', color: 'var(--text-secondary)' }}>
@@ -1522,7 +1522,7 @@ export default function EMAAlertSystem() {
                                 <span className="px-2.5 py-1.5 rounded-lg text-xs font-bold flex-shrink-0 min-h-[28px] inline-flex items-center" style={{
                                   background: fastAbove ? 'var(--green-bg)' : 'var(--red-bg)',
                                   color: fastAbove ? 'var(--green)' : 'var(--red)',
-                                  border: `1px solid ${fastAbove ? 'rgba(52,211,153,0.3)' : 'rgba(251,113,133,0.3)'}`
+                                  border: `1px solid ${fastAbove ? 'rgba(22,163,74,0.2)' : 'rgba(220,38,38,0.2)'}`
                                 }}>
                                   {fastAbove ? '▲ Bullish' : '▼ Bearish'}
                                 </span>

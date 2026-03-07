@@ -1,23 +1,23 @@
 @import "tailwindcss";
 
 :root {
-  --bg-primary: #080c14;
-  --bg-card: #111827;
-  --bg-card-hover: #1a2332;
-  --bg-elevated: #1e293b;
-  --border-subtle: #1e293b;
-  --border-medium: #334155;
-  --accent: #22d3ee;
-  --accent-hover: #06b6d4;
-  --green: #34d399;
-  --green-bg: rgba(52, 211, 153, 0.12);
-  --red: #fb7185;
-  --red-bg: rgba(251, 113, 133, 0.12);
-  --amber: #fbbf24;
-  --purple: #a78bfa;
-  --blue: #60a5fa;
-  --text-primary: #f8fafc;
-  --text-secondary: #cbd5e1;
+  --bg-primary: #f8fafc;
+  --bg-card: #ffffff;
+  --bg-card-hover: #f1f5f9;
+  --bg-elevated: #f1f5f9;
+  --border-subtle: #e2e8f0;
+  --border-medium: #cbd5e1;
+  --accent: #0ea5e9;
+  --accent-hover: #0284c7;
+  --green: #16a34a;
+  --green-bg: rgba(22, 163, 74, 0.08);
+  --red: #dc2626;
+  --red-bg: rgba(220, 38, 38, 0.08);
+  --amber: #d97706;
+  --purple: #7c3aed;
+  --blue: #2563eb;
+  --text-primary: #0f172a;
+  --text-secondary: #334155;
   --text-muted: #64748b;
 }
 
@@ -73,7 +73,7 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #334155;
+  background: #cbd5e1;
   border-radius: 3px;
 }
 
@@ -83,6 +83,7 @@ body {
   border: 1px solid var(--border-subtle);
   border-radius: 16px;
   padding: 24px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
 
 /* ===== TIMEFRAME BUTTON ===== */
@@ -99,14 +100,14 @@ body {
 }
 
 .tf-btn:hover {
-  background: var(--border-medium);
+  background: var(--border-subtle);
   color: var(--text-secondary);
 }
 
 .tf-btn.active {
   background: var(--accent);
   border-color: var(--accent);
-  color: #080c14;
+  color: #ffffff;
   font-weight: 700;
 }
 
@@ -126,7 +127,7 @@ body {
 .ema-quick:hover:not(:disabled) {
   background: var(--accent);
   border-color: var(--accent);
-  color: #080c14;
+  color: #ffffff;
 }
 
 .ema-quick:disabled {
@@ -182,24 +183,24 @@ body {
 }
 
 .cta.go {
-  background: linear-gradient(135deg, #34d399, #10b981);
-  color: #080c14;
-  box-shadow: 0 0 24px rgba(52, 211, 153, 0.25);
+  background: linear-gradient(135deg, #16a34a, #15803d);
+  color: #ffffff;
+  box-shadow: 0 2px 8px rgba(22, 163, 74, 0.2);
 }
 
 .cta.go:hover:not(:disabled) {
-  box-shadow: 0 0 36px rgba(52, 211, 153, 0.4);
+  box-shadow: 0 4px 16px rgba(22, 163, 74, 0.3);
   transform: translateY(-1px);
 }
 
 .cta.halt {
-  background: linear-gradient(135deg, #fb7185, #f43f5e);
-  color: white;
-  box-shadow: 0 0 24px rgba(251, 113, 133, 0.25);
+  background: linear-gradient(135deg, #dc2626, #b91c1c);
+  color: #ffffff;
+  box-shadow: 0 2px 8px rgba(220, 38, 38, 0.2);
 }
 
 .cta.halt:hover:not(:disabled) {
-  box-shadow: 0 0 36px rgba(251, 113, 133, 0.4);
+  box-shadow: 0 4px 16px rgba(220, 38, 38, 0.3);
   transform: translateY(-1px);
 }
 
@@ -246,10 +247,10 @@ body {
 
 /* ===== MISC ===== */
 .search-drop {
-  background: #1e293b;
+  background: #ffffff;
   border: 1px solid var(--border-medium);
   border-radius: 12px;
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
 }
 
 .input-field {
@@ -266,7 +267,7 @@ body {
 .input-field:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.12);
+  box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.12);
 }
 
 .input-field::placeholder {
@@ -331,79 +332,8 @@ body {
   }
 }
 
-/* ===== CLERK (sign-in / sign-up / OTP) — in-app look, no external container ===== */
-/* Match app dark theme; no floating white card, no "Secured by Clerk" footer */
-[data-clerk-component],
-.clerk-box,
-[class*='clerk-'] {
-  --clerk-background: var(--bg-primary) !important;
-  --clerk-foreground: var(--text-primary) !important;
-  color-scheme: dark !important;
-  background: transparent !important;
-}
-
-[data-clerk-component] > div {
-  background: transparent !important;
-  color: var(--text-primary) !important;
-}
-
-/* Form area: same as app cards, no heavy border/shadow */
-[data-clerk-component] .clerk-card,
-[data-clerk-component] [class*='card'] {
-  background: var(--bg-card) !important;
-  border: 1px solid var(--border-subtle) !important;
-  color: var(--text-primary) !important;
-  box-shadow: none !important;
-}
-
-/* Hide Clerk footer ("Secured by clerk", "Development mode") */
-[data-clerk-component] [class*='footer'],
-[data-clerk-component] footer,
-[data-clerk-component] a[href*='clerk.com'] {
-  display: none !important;
-}
-
-/* Header/navbar: minimal, match app */
-[data-clerk-component] header,
-[data-clerk-component] [class*='navbar'],
-[data-clerk-component] [class*='header'] {
-  background: transparent !important;
-  border: none !important;
-  color: var(--text-primary) !important;
-}
-
-[data-clerk-component] button,
-[data-clerk-component] a {
-  color: var(--text-primary) !important;
-}
-[data-clerk-component] button[type='submit'],
-[data-clerk-component] a[data-primary-link] {
-  background: var(--accent) !important;
-  color: var(--bg-primary) !important;
-}
-[data-clerk-component] input {
-  background: var(--bg-elevated) !important;
-  color: var(--text-primary) !important;
-  border-color: var(--border-medium) !important;
-}
-[data-clerk-component] input::placeholder {
-  color: var(--text-muted) !important;
-  opacity: 1;
-}
-[data-clerk-component] form,
-[data-clerk-component] [role='presentation'] {
-  background: transparent !important;
-  color: var(--text-primary) !important;
-}
-
-[data-clerk-component] p,
-[data-clerk-component] span,
-[data-clerk-component] label,
-[data-clerk-component] h1,
-[data-clerk-component] h2 {
-  color: var(--text-primary) !important;
-}
-
+/* ===== CLERK — use Clerk's default styling, just set page background ===== */
 body:has([data-clerk-component]) {
+  background: #f8fafc !important;
   overflow-x: hidden;
 }
