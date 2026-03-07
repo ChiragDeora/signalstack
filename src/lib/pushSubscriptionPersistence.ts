@@ -1,51 +1,55 @@
 /**
- * Server-side persistence for push notification subscriptions.
+ * Server-side persistence for push notification subscriptions in Supabase.
  * Survives process restarts so push alerts work after deploy without re-enabling.
  */
 
 import { PushSubscriptionData } from './types';
-import path from 'path';
-import fs from 'fs/promises';
+import { getSupabaseAdmin } from './supabaseServer';
 
-const DATA_DIR = path.join(process.cwd(), 'data');
-const SUBS_FILE = path.join(DATA_DIR, 'push-subscriptions.json');
-
-async function ensureDir(): Promise<void> {
-  await fs.mkdir(DATA_DIR, { recursive: true });
+interface SubRow {
+  endpoint: string;
+  keys_p256dh: string;
+  keys_auth: string;
+  user_id?: string | null;
 }
 
-async function readSubscriptions(): Promise<PushSubscriptionData[]> {
-  try {
-    await ensureDir();
-    const raw = await fs.readFile(SUBS_FILE, 'utf-8');
-    const data = JSON.parse(raw);
-    if (!Array.isArray(data)) return [];
-    return data as PushSubscriptionData[];
-  } catch (e: any) {
-    if (e?.code === 'ENOENT') return [];
-    console.warn('pushSubscriptionPersistence: read failed', e?.message);
-    return [];
-  }
-}
-
-async function writeSubscriptions(subs: PushSubscriptionData[]): Promise<void> {
-  await ensureDir();
-  await fs.writeFile(SUBS_FILE, JSON.stringify(subs, null, 0), 'utf-8');
+function rowToSub(row: SubRow): PushSubscriptionData {
+  return {
+    endpoint: row.endpoint,
+    keys: {
+      p256dh: row.keys_p256dh,
+      auth: row.keys_auth,
+    },
+  };
 }
 
 export async function getAllPushSubscriptions(): Promise<PushSubscriptionData[]> {
-  return readSubscriptions();
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return [];
+  const { data, error } = await supabase.from('push_subscriptions').select('endpoint, keys_p256dh, keys_auth');
+  if (error) {
+    console.warn('pushSubscriptionPersistence: read failed', error.message);
+    return [];
+  }
+  return (data || []).map((row: SubRow) => rowToSub(row));
 }
 
-export async function savePushSubscription(sub: PushSubscriptionData): Promise<void> {
-  const all = await readSubscriptions();
-  const filtered = all.filter((s) => s.endpoint !== sub.endpoint);
-  filtered.push(sub);
-  await writeSubscriptions(filtered);
+export async function savePushSubscription(sub: PushSubscriptionData, userId?: string | null): Promise<void> {
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return;
+  const row = {
+    endpoint: sub.endpoint,
+    keys_p256dh: sub.keys.p256dh,
+    keys_auth: sub.keys.auth,
+    user_id: userId ?? null,
+  };
+  const { error } = await supabase.from('push_subscriptions').upsert(row, { onConflict: 'endpoint' });
+  if (error) console.warn('pushSubscriptionPersistence: save failed', error.message);
 }
 
 export async function removePushSubscription(endpoint: string): Promise<void> {
-  const all = await readSubscriptions();
-  const filtered = all.filter((s) => s.endpoint !== endpoint);
-  await writeSubscriptions(filtered);
+  const supabase = getSupabaseAdmin();
+  if (!supabase) return;
+  const { error } = await supabase.from('push_subscriptions').delete().eq('endpoint', endpoint);
+  if (error) console.warn('pushSubscriptionPersistence: remove failed', error.message);
 }

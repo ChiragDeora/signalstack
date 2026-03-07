@@ -8,6 +8,7 @@ import { sendEmail, isBrevoConfigured } from '@/lib/brevoEmail';
 // POST: Subscribe to push notifications
 export async function POST(req: NextRequest) {
   try {
+    const { userId } = await auth();
     const subscription = await req.json();
 
     if (!subscription?.endpoint || !subscription?.keys) {
@@ -26,7 +27,7 @@ export async function POST(req: NextRequest) {
     };
     const svc = await getOrCreateCrossoverService();
     svc.addPushSubscription(subData);
-    await savePushSubscription(subData).catch((e) => console.warn('Persist push subscription failed:', e?.message));
+    await savePushSubscription(subData, userId ?? null).catch((e) => console.warn('Persist push subscription failed:', e?.message));
 
     // Send a test push immediately so the user sees a browser notification right away
     try {
@@ -37,7 +38,6 @@ export async function POST(req: NextRequest) {
     }
 
     // Send a one-time test email so the user can confirm push/notifications are working
-    const { userId } = await auth();
     if (userId && isBrevoConfigured()) {
       try {
         const email = await getClerkUserEmail(userId);

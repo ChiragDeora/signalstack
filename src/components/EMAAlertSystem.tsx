@@ -8,15 +8,17 @@ import {
 } from 'lucide-react';
 import { UserButton, useUser } from '@clerk/nextjs';
 import axios from 'axios';
-import {
-  getMonitoredWatches,
-  setMonitoredWatches,
-  addMonitoredWatch,
-  removeMonitoredWatch,
-  clearMonitoredWatches,
-  type MonitoredWatch,
-} from '@/lib/monitoredDb';
 import { io, Socket } from 'socket.io-client';
+
+interface MonitoredWatch {
+  symbol: string;
+  timeframe: string;
+  emaPeriods: number[];
+  trackBullish: boolean;
+  trackBearish: boolean;
+  exchange: string;
+  currency: string;
+}
 
 // ===================================
 // TYPES
@@ -77,43 +79,6 @@ const COLORS = [
 ];
 
 const DEFAULT_TIMEFRAME = '5m';
-const PERSIST_KEY = 'signalstack-config';
-
-interface PersistedConfig {
-  symbols: MonitoredSymbol[];
-  timeframeBySymbol: Record<string, string>;
-  emasBySymbol: Record<string, EMA[]>;
-  trackBullish: boolean;
-  trackBearish: boolean;
-  selectedSymbol: string | null;
-}
-
-function loadPersistedConfig(): PersistedConfig | null {
-  if (typeof window === 'undefined') return null;
-  try {
-    const raw = localStorage.getItem(PERSIST_KEY);
-    if (!raw) return null;
-    const data = JSON.parse(raw) as PersistedConfig;
-    if (!data || !Array.isArray(data.symbols)) return null;
-    return {
-      symbols: data.symbols,
-      timeframeBySymbol: data.timeframeBySymbol && typeof data.timeframeBySymbol === 'object' ? data.timeframeBySymbol : {},
-      emasBySymbol: data.emasBySymbol && typeof data.emasBySymbol === 'object' ? data.emasBySymbol : {},
-      trackBullish: typeof data.trackBullish === 'boolean' ? data.trackBullish : true,
-      trackBearish: typeof data.trackBearish === 'boolean' ? data.trackBearish : true,
-      selectedSymbol: typeof data.selectedSymbol === 'string' || data.selectedSymbol === null ? data.selectedSymbol : null,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function savePersistedConfig(config: PersistedConfig): void {
-  if (typeof window === 'undefined') return;
-  try {
-    localStorage.setItem(PERSIST_KEY, JSON.stringify(config));
-  } catch { /* ignore */ }
-}
 
 export default function EMAAlertSystem() {
   const socketRef = useRef<Socket | null>(null);
@@ -202,46 +167,80 @@ export default function EMAAlertSystem() {
       .catch(() => { /* ignore */ });
   }, [mounted]);
 
-  // Restore persisted config once on mount (client-only)
-  useEffect(() => {
-    if (!mounted || hasRestoredRef.current) return;
-    hasRestoredRef.current = true;
-    const saved = loadPersistedConfig();
-    if (saved && saved.symbols.length > 0) {
-      setSymbols((saved.symbols || []).map((s) => ({ ...s, exchange: s.exchange || 'NSE' })));
-      setTimeframeBySymbol(saved.timeframeBySymbol);
-      setEmasBySymbol(saved.emasBySymbol);
-      setTrackBullish(saved.trackBullish);
-      setTrackBearish(saved.trackBearish);
-      setSelectedSymbol(saved.selectedSymbol ?? saved.symbols[0]?.symbol ?? null);
-    }
-  }, [mounted]);
+  // Refetch watches from Supabase and set local state (call after start/stop monitor)
+  const refetchWatches = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const res = await axios.get<{ success: boolean; watches?: MonitoredWatch[] }>('/api/user/watches');
+      if (res.data.success && Array.isArray(res.data.watches)) {
+        setMonitoredSymbols(new Set(res.data.watches.map((w) => w.symbol)));
+      }
+    } catch { /* ignore */ }
+  }, [userId]);
 
-  // Persist config whenever it changes
+  // Restore user config from Supabase once on mount (when signed in)
   useEffect(() => {
-    if (!mounted || !hasRestoredRef.current) return;
-    savePersistedConfig({
-      symbols,
-      timeframeBySymbol,
-      emasBySymbol,
-      trackBullish,
-      trackBearish,
-      selectedSymbol,
-    });
-  }, [mounted, symbols, timeframeBySymbol, emasBySymbol, trackBullish, trackBearish, selectedSymbol]);
+    if (!mounted || !userId || hasRestoredRef.current) return;
+    axios
+      .get<{ success: boolean; config?: { symbols: MonitoredSymbol[]; timeframeBySymbol: Record<string, string>; emasBySymbol: Record<string, EMA[]>; trackBullish: boolean; trackBearish: boolean; selectedSymbol: string | null } }>('/api/user/config')
+      .then((res) => {
+        if (!res.data.success || !res.data.config) return;
+        const c = res.data.config;
+        if (c.symbols?.length > 0) {
+          setSymbols((c.symbols || []).map((s) => ({ ...s, exchange: s.exchange || 'NSE' })));
+          setTimeframeBySymbol(c.timeframeBySymbol || {});
+          setEmasBySymbol(c.emasBySymbol || {});
+          setTrackBullish(c.trackBullish !== false);
+          setTrackBearish(c.trackBearish !== false);
+          setSelectedSymbol(c.selectedSymbol ?? c.symbols[0]?.symbol ?? null);
+        }
+      })
+      .catch((err: any) => {
+        console.error('[EMAAlertSystem] Load config failed:', err.response?.status, err.response?.data?.error ?? err.message);
+      })
+      .finally(() => {
+        hasRestoredRef.current = true;
+      });
+  }, [mounted, userId]);
 
-  // Restore monitoring from IndexedDB and re-register with server (survives refresh / server restart)
+  // Persist config to Supabase when it changes (debounced to avoid excessive writes)
+  const configPersistRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!mounted || !userId) return;
+    if (!hasRestoredRef.current) return;
+    if (configPersistRef.current) clearTimeout(configPersistRef.current);
+    configPersistRef.current = setTimeout(() => {
+      configPersistRef.current = null;
+      axios.put('/api/user/config', {
+        symbols,
+        timeframeBySymbol,
+        emasBySymbol,
+        trackBullish,
+        trackBearish,
+        selectedSymbol,
+      }).then(() => {
+        if (symbols.length > 0) console.log('[EMAAlertSystem] Config saved to Supabase, symbols:', symbols.length);
+      }).catch((err: any) => {
+        console.error('[EMAAlertSystem] Config save failed:', err.response?.status, err.response?.data?.error ?? err.message);
+      });
+    }, 800);
+    return () => { if (configPersistRef.current) clearTimeout(configPersistRef.current); };
+  }, [mounted, userId, symbols, timeframeBySymbol, emasBySymbol, trackBullish, trackBearish, selectedSymbol]);
+
+  // Restore monitoring from Supabase and re-register with server (survives refresh / server restart)
   useEffect(() => {
     if (!mounted || !userId || hasRestoredMonitoredRef.current) return;
     hasRestoredMonitoredRef.current = true;
-    getMonitoredWatches(userId)
-      .then(async (watches) => {
+    axios
+      .get<{ success: boolean; watches?: MonitoredWatch[] }>('/api/user/watches')
+      .then(async (res) => {
+        const watches = res.data.success && Array.isArray(res.data.watches) ? res.data.watches : [];
         if (watches.length === 0) return;
         setMonitorStatus('Restoring monitoring...');
         const restored: string[] = [];
         for (const w of watches) {
           try {
-            const res = await axios.post('/api/monitor', {
+            const r = await axios.post('/api/monitor', {
               symbol: w.symbol,
               timeframe: w.timeframe,
               emaPeriods: w.emaPeriods,
@@ -250,7 +249,7 @@ export default function EMAAlertSystem() {
               exchange: w.exchange,
               currency: w.currency,
             });
-            if (res.data.success) restored.push(w.symbol);
+            if (r.data.success) restored.push(w.symbol);
           } catch { /* skip failed */ }
         }
         if (restored.length > 0) {
@@ -258,7 +257,7 @@ export default function EMAAlertSystem() {
         }
         setMonitorStatus('');
       })
-      .catch(() => { /* IndexedDB not available or error */ });
+      .catch(() => {});
   }, [mounted, userId]);
 
   // ===================================
@@ -505,7 +504,7 @@ export default function EMAAlertSystem() {
       next.delete(sym);
       return next;
     });
-    if (userId) removeMonitoredWatch(userId, sym, tf).catch(() => {});
+    if (userId) refetchWatches();
     const key = watchKey(sym, tf);
     setPriceByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
     setEmaByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
@@ -607,17 +606,7 @@ export default function EMAAlertSystem() {
       if (res.data.success) {
         setMonitoredSymbols((prev) => new Set(prev).add(sym));
         setMonitorStatus('');
-        if (userId) {
-          addMonitoredWatch(userId, {
-            symbol: s.symbol,
-            timeframe: tf,
-            emaPeriods: symbolEmas.map((e) => e.period),
-            trackBullish,
-            trackBearish,
-            exchange: s.exchange || 'NSE',
-            currency: s.currency,
-          }).catch(() => {});
-        }
+        if (userId) refetchWatches();
       } else {
         setMonitorStatus(res.data.message || 'Failed');
       }
@@ -670,13 +659,7 @@ export default function EMAAlertSystem() {
       }
       if (started.length > 0) {
         setMonitoredSymbols((prev) => new Set([...prev, ...started]));
-        if (userId) {
-          getMonitoredWatches(userId).then((existing) => {
-            const byKey = new Map(existing.map((w) => [`${w.symbol}:${w.timeframe}`, w]));
-            for (const w of startedWatches) byKey.set(`${w.symbol}:${w.timeframe}`, w);
-            setMonitoredWatches(userId, [...byKey.values()]).catch(() => {});
-          }).catch(() => {});
-        }
+        if (userId) refetchWatches();
       }
       setMonitorStatus(prev => (started.length > 0 ? '' : prev));
     } catch (err: any) {
@@ -692,11 +675,18 @@ export default function EMAAlertSystem() {
       }
       setMonitoredSymbols(new Set());
       setMonitorStatus('');
-      if (userId) clearMonitoredWatches(userId).catch(() => {});
+      if (userId) refetchWatches();
     } catch { /* ignore */ }
   };
 
-  const _resetAll = () => {
+  const _resetAll = async () => {
+    if (monitoredSymbols.size > 0) {
+      try {
+        for (const sym of monitoredSymbols) {
+          await axios.delete('/api/monitor', { data: { symbol: sym, timeframe: getTimeframe(sym) } });
+        }
+      } catch { /* ignore */ }
+    }
     setMonitoredSymbols(new Set());
     setMonitorStatus('');
     setSymbols([]);
@@ -710,8 +700,10 @@ export default function EMAAlertSystem() {
     setShowAddEma(false);
     setNewEmaPeriod('');
     setEditingPairIndex(null);
-    if (typeof window !== 'undefined') try { localStorage.removeItem(PERSIST_KEY); } catch { /* ignore */ }
-    if (userId) clearMonitoredWatches(userId).catch(() => {});
+    if (userId) {
+      axios.put('/api/user/config', { symbols: [], timeframeBySymbol: {}, emasBySymbol: {}, trackBullish: true, trackBearish: true, selectedSymbol: null }).catch(() => {});
+      refetchWatches();
+    }
   };
 
   /** Reset: stop all monitoring and clear live data only. Keeps symbol list and EMA config. */
@@ -726,7 +718,7 @@ export default function EMAAlertSystem() {
     setNewEmaPeriod('');
     setEditingPairIndex(null);
     setSelectedSymbol((prev) => (symbols.length > 0 ? (prev && symbols.some((s) => s.symbol === prev) ? prev : symbols[0].symbol) : null));
-    if (userId) clearMonitoredWatches(userId).catch(() => {});
+    if (userId) refetchWatches();
   };
 
   const handleReset = async () => {
