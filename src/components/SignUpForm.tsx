@@ -31,26 +31,26 @@ export function SignUpForm() {
   }
 
   return (
-    <div className="min-h-dvh flex items-center justify-center">
+    <div className="min-h-dvh flex items-center justify-center safe-area-inset">
       <SignUp
         appearance={{
           variables: {
-            colorPrimary: '#2563eb',
-            colorBackground: '#ffffff',
-            colorInputBackground: '#f1f5f9',
-            colorText: '#0f172a',
-            colorTextSecondary: '#475569',
-            colorInputText: '#0f172a',
+            colorPrimary: '#22d3ee',
+            colorBackground: '#080c14',
+            colorInputBackground: '#1e293b',
+            colorText: '#f8fafc',
+            colorTextSecondary: '#cbd5e1',
+            colorInputText: '#f8fafc',
             borderRadius: '12px',
           },
           elements: {
-            rootBox: 'mx-auto',
-            card: '!bg-white !border !border-slate-200 !shadow-xl',
-            cardBox: '!bg-white',
+            rootBox: 'w-full max-w-md mx-auto',
+            card: '!bg-transparent !border-0 !shadow-none',
+            cardBox: '!bg-transparent',
             header: 'hidden',
             navbar: 'hidden',
-            formFieldInput: '!bg-slate-100 !text-slate-900 !border-slate-200 placeholder:!text-slate-500',
-            formButtonPrimary: '!bg-blue-600 !text-white',
+            formFieldInput: '!bg-[#1e293b] !text-[#f8fafc] !border-[#334155]',
+            formButtonPrimary: '!bg-[#22d3ee] !text-[#080c14]',
           },
         }}
         forceRedirectUrl={redirectUrl}

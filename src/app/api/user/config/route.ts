@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { auth } from '@clerk/nextjs/server';
+import { auth, currentUser } from '@clerk/nextjs/server';
 import { getSupabaseAdmin } from '@/lib/supabaseServer';
 
 export interface UserConfigPayload {
@@ -26,7 +26,7 @@ export async function GET() {
     }
     const { data, error } = await supabase
       .from('user_config')
-      .select('symbols, timeframe_by_symbol, emas_by_symbol, track_bullish, track_bearish, selected_symbol')
+      .select('symbols, timeframe_by_symbol, emas_by_symbol, track_bullish, track_bearish, selected_symbol, name, email')
       .eq('user_id', userId)
       .single();
     if (error && error.code !== 'PGRST116') {
@@ -63,7 +63,7 @@ export async function GET() {
   }
 }
 
-// PUT: upsert current user's config
+// PUT: upsert current user's config (includes name/email from Clerk for cross-check)
 export async function PUT(req: NextRequest) {
   try {
     const { userId } = await auth();
@@ -71,6 +71,22 @@ export async function PUT(req: NextRequest) {
       console.warn('[user/config] PUT: no userId (sign in required)');
       return NextResponse.json({ success: false, error: 'Sign in required' }, { status: 401 });
     }
+    let name: string | null = null;
+    let email: string | null = null;
+    let phone: string | null = null;
+    try {
+      const user = await currentUser();
+      if (user) {
+        name = [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || null;
+        const u = user as { primaryEmailAddress?: { emailAddress?: string }; emailAddresses?: { emailAddress?: string }[]; primaryPhoneNumber?: { phoneNumber?: string } };
+        email = u.primaryEmailAddress?.emailAddress ?? u.emailAddresses?.[0]?.emailAddress ?? null;
+        phone = u.primaryPhoneNumber?.phoneNumber ?? null;
+      }
+      console.log('[user/config] Clerk name/email/phone:', { name, email, phone });
+    } catch (e) {
+      console.warn('[user/config] currentUser() failed, saving without name/email/phone:', (e as Error).message);
+    }
+
     const body = (await req.json()) as UserConfigPayload;
     const supabase = getSupabaseAdmin();
     if (!supabase) {
@@ -79,6 +95,9 @@ export async function PUT(req: NextRequest) {
     }
     const row = {
       user_id: userId,
+      name: name ?? null,
+      email: email ?? null,
+      phone: phone ?? null,
       symbols: body.symbols ?? [],
       timeframe_by_symbol: body.timeframeBySymbol ?? {},
       emas_by_symbol: body.emasBySymbol ?? {},

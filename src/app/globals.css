@@ -331,75 +331,79 @@ body {
   }
 }
 
-/* ===== CLERK (UserButton dropdown, sign-in / sign-up) ===== */
-/* No dark container: root and wrappers transparent; dark text */
+/* ===== CLERK (sign-in / sign-up / OTP) — in-app look, no external container ===== */
+/* Match app dark theme; no floating white card, no "Secured by Clerk" footer */
 [data-clerk-component],
 .clerk-box,
 [class*='clerk-'] {
-  --clerk-background: #ffffff !important;
-  --clerk-foreground: #0f172a !important;
-  color-scheme: light !important;
+  --clerk-background: var(--bg-primary) !important;
+  --clerk-foreground: var(--text-primary) !important;
+  color-scheme: dark !important;
   background: transparent !important;
 }
 
 [data-clerk-component] > div {
   background: transparent !important;
-  color: #0f172a !important;
+  color: var(--text-primary) !important;
 }
 
-/* Only the form card stays white; rest is transparent so no dark box */
+/* Form area: same as app cards, no heavy border/shadow */
 [data-clerk-component] .clerk-card,
 [data-clerk-component] [class*='card'] {
-  background: #ffffff !important;
-  border: 1px solid #e2e8f0 !important;
-  color: #0f172a !important;
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border-subtle) !important;
+  color: var(--text-primary) !important;
+  box-shadow: none !important;
 }
 
-/* Header/navbar in Clerk modal: light */
+/* Hide Clerk footer ("Secured by clerk", "Development mode") */
+[data-clerk-component] [class*='footer'],
+[data-clerk-component] footer,
+[data-clerk-component] a[href*='clerk.com'] {
+  display: none !important;
+}
+
+/* Header/navbar: minimal, match app */
 [data-clerk-component] header,
 [data-clerk-component] [class*='navbar'],
 [data-clerk-component] [class*='header'] {
-  background: #f8fafc !important;
-  border-bottom: 1px solid #e2e8f0 !important;
-  color: #0f172a !important;
+  background: transparent !important;
+  border: none !important;
+  color: var(--text-primary) !important;
 }
 
-/* Buttons and links in Clerk: dark text on light, primary for CTAs */
 [data-clerk-component] button,
 [data-clerk-component] a {
-  color: #0f172a !important;
+  color: var(--text-primary) !important;
 }
 [data-clerk-component] button[type='submit'],
 [data-clerk-component] a[data-primary-link] {
-  background: #2563eb !important;
-  color: #ffffff !important;
+  background: var(--accent) !important;
+  color: var(--bg-primary) !important;
 }
 [data-clerk-component] input {
-  background: #f1f5f9 !important;
-  color: #0f172a !important;
-  border-color: #e2e8f0 !important;
+  background: var(--bg-elevated) !important;
+  color: var(--text-primary) !important;
+  border-color: var(--border-medium) !important;
 }
 [data-clerk-component] input::placeholder {
-  color: #64748b !important;
+  color: var(--text-muted) !important;
   opacity: 1;
 }
-/* Target Clerk's form container so the whole card is light */
 [data-clerk-component] form,
 [data-clerk-component] [role='presentation'] {
-  background: #ffffff !important;
-  color: #0f172a !important;
+  background: transparent !important;
+  color: var(--text-primary) !important;
 }
 
-/* All text in Clerk: dark for readability on light background */
 [data-clerk-component] p,
 [data-clerk-component] span,
 [data-clerk-component] label,
 [data-clerk-component] h1,
 [data-clerk-component] h2 {
-  color: #0f172a !important;
+  color: var(--text-primary) !important;
 }
 
-/* Contain layout so no stray chars (e.g. "N") escape */
 body:has([data-clerk-component]) {
   overflow-x: hidden;
 }
