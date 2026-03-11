@@ -72,6 +72,17 @@ const INTERVAL_MAP: Record<string, string> = {
   '1d': 'ONE_DAY',
 };
 
+// Max historical span per interval, based on Angel One docs.
+// If we exceed these, Angel often returns status=false with no data.
+const INTERVAL_MAX_DAYS: Record<string, number> = {
+  ONE_MINUTE: 30,
+  FIVE_MINUTE: 90,
+  FIFTEEN_MINUTE: 90,
+  THIRTY_MINUTE: 180,
+  ONE_HOUR: 365,
+  ONE_DAY: 2000,
+};
+
 interface AngelSession {
   jwtToken: string;
   refreshToken: string;
@@ -502,9 +513,11 @@ export class AngelOneDataSource {
       console.warn(`⚠️  Angel: symbol "${symbol}" not found on ${exchange}`);
       return [];
     }
+    console.log(`🔎 Angel getCandleData: ${symbol} → token=${resolved.symboltoken} tradingsymbol=${resolved.tradingsymbol} exchange=${exchange}`);
     const interval = INTERVAL_MAP[timeframe] || 'FIVE_MINUTE';
     const toDate = new Date();
-    const fromDate = new Date(toDate.getTime() - 90 * 24 * 60 * 60 * 1000);
+    const maxDays = INTERVAL_MAX_DAYS[interval] ?? 90;
+    const fromDate = new Date(toDate.getTime() - maxDays * 24 * 60 * 60 * 1000);
     const fromStr = fromDate.toISOString().slice(0, 16).replace('T', ' ');
     const toStr = toDate.toISOString().slice(0, 16).replace('T', ' ');
     try {
@@ -537,8 +550,11 @@ export class AngelOneDataSource {
         this.session = null;
         return [];
       }
-      const json = JSON.parse(raw) as { status: boolean; data?: Array<string | number>[] };
-      if (!json.status || !Array.isArray(json.data)) return [];
+      const json = JSON.parse(raw) as { status: boolean; data?: Array<string | number>[]; message?: string };
+      if (!json.status || !Array.isArray(json.data)) {
+        console.warn(`❌ Angel One returned no data for ${symbol} (${exchange}) — status=${json.status} message=${json.message ?? 'none'} dataLength=${json.data?.length ?? 'null'}`);
+        return [];
+      }
       const candles: CandleData[] = json.data
         .map((row) => {
           const [ts, open, high, low, close, vol] = row as [string, number, number, number, number, number];
@@ -634,7 +650,7 @@ export class AngelOneDataSource {
       change: parseFloat(change.toFixed(2)),
       changePercent: parseFloat(changePercent.toFixed(2)),
       volume: latestCandle.volume,
-      timestamp: new Date(latestCandle.timestamp).toISOString(),
+      timestamp: new Date().toISOString(),
       timeframe,
       candleData: candles,
       market,

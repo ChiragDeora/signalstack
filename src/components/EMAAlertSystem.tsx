@@ -87,6 +87,7 @@ export default function EMAAlertSystem() {
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
   const [timeframeBySymbol, setTimeframeBySymbol] = useState<Record<string, string>>({});
   const [priceByKey, setPriceByKey] = useState<Record<string, { price: number; change: number; changePercent: number; currency: string; source: string; lastUpdate: Date | null }>>({});
+  const [priceErrorByKey, setPriceErrorByKey] = useState<Record<string, string>>({});
   const [emaByKey, setEmaByKey] = useState<Record<string, Record<number, number | null>>>({});
   const [warmupByKey, setWarmupByKey] = useState<Record<string, Record<number, number>>>({});
   const [searchQuery, setSearchQuery] = useState('');
@@ -112,12 +113,16 @@ export default function EMAAlertSystem() {
   const [editPairSlow, setEditPairSlow] = useState<number>(21);
   const [showRefreshModal, setShowRefreshModal] = useState(true);
   const [refreshModalMinTimeElapsed, setRefreshModalMinTimeElapsed] = useState(false);
+  const [showSearchMobile, setShowSearchMobile] = useState(false); // collapsed on mobile by default
+  const [showEmaConfig, setShowEmaConfig] = useState(false); // collapsed on mobile by default
   const [testEmailStatus, setTestEmailStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle');
   const [testEmailMessage, setTestEmailMessage] = useState<string | null>(null);
   const [testPushStatus, setTestPushStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle');
   const [testPushMessage, setTestPushMessage] = useState<string | null>(null);
   const hasRestoredRef = useRef(false);
   const hasRestoredMonitoredRef = useRef(false);
+  const [monitoringBusy, setMonitoringBusy] = useState(false);
+  const [restoringWatches, setRestoringWatches] = useState(false);
   const { user: clerkUser } = useUser();
   const userId = clerkUser?.id ?? null;
 
@@ -128,6 +133,7 @@ export default function EMAAlertSystem() {
   const displaySymbol = selectedSymbol ?? symbols[0]?.symbol ?? null;
   const displayTimeframe = displaySymbol ? getTimeframe(displaySymbol) : DEFAULT_TIMEFRAME;
   const displayPrice = displaySymbol ? priceByKey[watchKey(displaySymbol, displayTimeframe)] : null;
+  const displayPriceError = displaySymbol ? priceErrorByKey[watchKey(displaySymbol, displayTimeframe)] : undefined;
   const displayEmaValues = displaySymbol ? emaByKey[watchKey(displaySymbol, displayTimeframe)] ?? {} : {};
   const displayWarmupProgress = displaySymbol ? warmupByKey[watchKey(displaySymbol, displayTimeframe)] ?? {} : {};
   const _currency = displaySymbol ? (symbols.find((s) => s.symbol === displaySymbol)?.currency ?? 'INR') : 'INR';
@@ -141,14 +147,15 @@ export default function EMAAlertSystem() {
   // Refresh modal: show on load, hide when connected and monitoring ready (min 1.5s), or after 4s max
   useEffect(() => {
     const minT = setTimeout(() => setRefreshModalMinTimeElapsed(true), 1500);
-    const maxT = setTimeout(() => setShowRefreshModal(false), 4000);
-    return () => { clearTimeout(minT); clearTimeout(maxT); };
+    return () => { clearTimeout(minT); };
   }, []);
   useEffect(() => {
-    if (refreshModalMinTimeElapsed && connected && monitorStatus === '') {
+    if (!refreshModalMinTimeElapsed) return;
+    const hasAnyPrice = Object.keys(priceByKey).length > 0;
+    if (hasAnyPrice || symbols.length === 0) {
       setShowRefreshModal(false);
     }
-  }, [refreshModalMinTimeElapsed, connected, monitorStatus]);
+  }, [refreshModalMinTimeElapsed, priceByKey, symbols.length]);
 
   // Check if push is configured on this deployment (e.g. Vercel returns 503 without VAPID env)
   useEffect(() => {
@@ -231,6 +238,7 @@ export default function EMAAlertSystem() {
   useEffect(() => {
     if (!mounted || !userId || hasRestoredMonitoredRef.current) return;
     hasRestoredMonitoredRef.current = true;
+    setRestoringWatches(true);
     axios
       .get<{ success: boolean; watches?: MonitoredWatch[] }>('/api/user/watches')
       .then(async (res) => {
@@ -240,6 +248,18 @@ export default function EMAAlertSystem() {
         const restored: string[] = [];
         for (const w of watches) {
           try {
+            // Check if the server already has this watch running (warm EMAs)
+            // to avoid destroying EMA state with a redundant POST on every refresh.
+            const emaCheck = await axios.get<{ emas?: Record<number, number | null>; warmupProgress?: Record<number, number> }>(
+              `/api/ema-status?symbol=${encodeURIComponent(w.symbol)}&timeframe=${encodeURIComponent(w.timeframe)}`
+            );
+            const hasWarmEmas = emaCheck.data?.emas && Object.values(emaCheck.data.emas).some((v) => v != null);
+            if (hasWarmEmas) {
+              // Watch is already running server-side — just mark as monitored locally
+              restored.push(w.symbol);
+              continue;
+            }
+            // Watch not running — start it
             const r = await axios.post('/api/monitor', {
               symbol: w.symbol,
               timeframe: w.timeframe,
@@ -257,7 +277,10 @@ export default function EMAAlertSystem() {
         }
         setMonitorStatus('');
       })
-      .catch(() => {});
+      .catch(() => { })
+      .finally(() => {
+        setRestoringWatches(false);
+      });
   }, [mounted, userId]);
 
   // ===================================
@@ -421,6 +444,18 @@ export default function EMAAlertSystem() {
     return symbols[c] || c;
   };
 
+  const getOptionMeta = (sym: string, exchange?: string): { isOption: boolean; side: 'CE' | 'PE' | null } => {
+    // Only treat as option for NFO instruments (we no longer infer expiry here)
+    if (exchange && exchange !== 'NFO') {
+      return { isOption: false, side: null };
+    }
+    const upper = sym.toUpperCase();
+    const isCE = upper.endsWith('CE');
+    const isPE = upper.endsWith('PE');
+    const isOption = isCE || isPE;
+    return { isOption, side: isCE ? 'CE' : isPE ? 'PE' : null };
+  };
+
   // ===================================
   // SEARCH
   // ===================================
@@ -535,6 +570,18 @@ export default function EMAAlertSystem() {
             lastUpdate: new Date(),
           },
         }));
+        setPriceErrorByKey((prev) => {
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+      } else {
+        const key = watchKey(sym, tf);
+        const msg: string =
+          typeof res.data?.error === 'string' && res.data.error.length > 0
+            ? res.data.error
+            : 'No price/EMA data available for this symbol and timeframe (contract may be expired or illiquid).';
+        setPriceErrorByKey((prev) => ({ ...prev, [key]: msg }));
       }
     } catch { /* ignore */ } finally { setIsFetchingPrice(false); }
   }, []);
@@ -596,16 +643,25 @@ export default function EMAAlertSystem() {
   };
 
   const startMonitoringForSymbol = async (sym: string) => {
+    if (restoringWatches) {
+      setMonitorStatus('Restoring existing monitoring from server — please wait until this finishes before changing monitors.');
+      return;
+    }
+    if (monitoringBusy) {
+      setMonitorStatus('Monitoring is already starting — please wait until it finishes before pressing the button again.');
+      return;
+    }
     const symbolEmas = emasBySymbol[sym] ?? [];
     if (symbolEmas.length < 2) {
-      setMonitorStatus(`${sym}: add at least 2 EMAs`);
+      setMonitorStatus(`${sym}: add at least 2 EMAs before starting monitoring.`);
       return;
     }
     const s = symbols.find((x) => x.symbol === sym);
     if (!s) return;
     const tf = getTimeframe(sym);
     try {
-      setMonitorStatus(`Starting ${sym}...`);
+      setMonitoringBusy(true);
+      setMonitorStatus(`Starting ${sym} — loading up to 90 days of history and warming EMAs. This can take 20–30 seconds.`);
       const res = await axios.post('/api/monitor', {
         symbol: s.symbol,
         timeframe: tf,
@@ -625,6 +681,8 @@ export default function EMAAlertSystem() {
     } catch (err: any) {
       setMonitorStatus('Error');
       console.error(err);
+    } finally {
+      setMonitoringBusy(false);
     }
   };
 
@@ -634,7 +692,7 @@ export default function EMAAlertSystem() {
     const toStop = new Set(monitoredSymbols);
     toStop.forEach((sym) => {
       const tf = getTimeframe(sym);
-      axios.delete('/api/monitor', { data: { symbol: sym, timeframe: tf } }).catch(() => {});
+      axios.delete('/api/monitor', { data: { symbol: sym, timeframe: tf } }).catch(() => { });
       const key = watchKey(sym, tf);
       setPriceByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
       setEmaByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
@@ -647,12 +705,21 @@ export default function EMAAlertSystem() {
   }, [monitoredSymbols, getTimeframe, userId]);
 
   const _startMonitoring = async () => {
+    if (restoringWatches) {
+      setMonitorStatus('Restoring existing monitoring from server — please wait until this finishes before changing monitors.');
+      return;
+    }
+    if (monitoringBusy) {
+      setMonitorStatus('Monitoring is already starting — please wait until it finishes before pressing the button again.');
+      return;
+    }
     if (symbols.length === 0) {
       alert('Add at least one symbol');
       return;
     }
     try {
-      setMonitorStatus('Starting...');
+      setMonitoringBusy(true);
+      setMonitorStatus('Starting monitoring for all symbols — loading up to 90 days of history and warming EMAs. This can take 20–30 seconds.');
       const started: string[] = [];
       const startedWatches: MonitoredWatch[] = [];
       for (const s of symbols) {
@@ -695,6 +762,8 @@ export default function EMAAlertSystem() {
     } catch (err: any) {
       setMonitorStatus('Error');
       console.error(err);
+    } finally {
+      setMonitoringBusy(false);
     }
   };
 
@@ -731,7 +800,7 @@ export default function EMAAlertSystem() {
     setNewEmaPeriod('');
     setEditingPairIndex(null);
     if (userId) {
-      axios.put('/api/user/config', { symbols: [], timeframeBySymbol: {}, emasBySymbol: {}, trackBullish: true, trackBearish: true, selectedSymbol: null }).catch(() => {});
+      axios.put('/api/user/config', { symbols: [], timeframeBySymbol: {}, emasBySymbol: {}, trackBullish: true, trackBearish: true, selectedSymbol: null }).catch(() => { });
       refetchWatches();
     }
   };
@@ -901,10 +970,10 @@ export default function EMAAlertSystem() {
           >
             <RefreshCw className="w-10 h-10 mx-auto mb-4 animate-spin opacity-80" style={{ color: 'var(--accent)' }} />
             <h3 className="font-semibold text-base mb-2" style={{ color: 'var(--text-primary)' }}>
-              Fetching refreshed data
+              Preparing your EMA watches
             </h3>
             <p className="text-sm leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-              Wait a moment until all alerts are showing and monitoring is active again.
+              This can take a bit while we fetch up to 90 days of price data and warm up EMAs for all your symbols. Please wait until this finishes.
             </p>
           </div>
         </div>
@@ -1032,121 +1101,201 @@ export default function EMAAlertSystem() {
           </div>
         </header>
 
-        {/* ─── MONITORING BANNER ─── */}
-        {isMonitoring && (
-          <div className="mb-4 px-4 py-3 rounded-xl flex items-center justify-between flex-wrap gap-2"
+        {/* ─── MONITORING / STATUS BANNER (compact on mobile) ─── */}
+        {(isMonitoring || monitorStatus) && (
+          <div className="mb-3 sm:mb-4 px-3 sm:px-4 py-2.5 sm:py-3 rounded-xl flex items-center justify-between gap-2"
             style={{ background: 'var(--green-bg)', border: '1px solid rgba(22,163,74,0.2)' }}>
-            <div className="flex items-center gap-3 min-w-0 flex-wrap">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
               <div className="relative flex-shrink-0">
-                <Activity className="w-5 h-5 text-green-600" />
+                <Activity className="w-4 h-4 sm:w-5 sm:h-5 text-green-600" />
                 <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-emerald-400 rounded-full animate-ping" />
               </div>
-              <span className="text-green-600/80 text-xs">Per-symbol timeframes — {monitorStatus || 'Monitoring active'}</span>
-              <div className="flex flex-wrap gap-2">
-                {symbols.filter((s) => monitoredSymbols.has(s.symbol)).map((s) => (
-                  <div key={s.symbol} className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg" style={{ background: 'var(--green-bg)', border: '1px solid rgba(22,163,74,0.2)' }}>
-                    <span className="font-bold text-green-700 text-sm">{s.symbol}</span>
-                    <span className="text-green-600/80 text-xs">({getTimeframe(s.symbol)})</span>
-                    <button
-                      type="button"
-                      onClick={() => stopMonitoringForSymbol(s.symbol)}
-                      className="p-1 rounded hover:bg-red-50 flex items-center justify-center"
-                      style={{ color: 'var(--red)' }}
-                      title={`Stop monitoring ${s.symbol}`}
-                    >
-                      <Power className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                ))}
-              </div>
+              <span className="text-green-600/80 text-xs truncate">
+                {monitorStatus || `${monitoredSymbols.size} active`}
+              </span>
             </div>
-            <button onClick={stopMonitoring}
-              className="flex-shrink-0 flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold"
-              style={{ background: 'var(--red-bg)', border: '1px solid rgba(220,38,38,0.2)', color: 'var(--red)' }}>
-              <Power className="w-3.5 h-3.5" />
-              Stop all
-            </button>
+            {isMonitoring && (
+              <button
+                onClick={stopMonitoring}
+                className="flex-shrink-0 flex items-center gap-1 px-2.5 py-1.5 sm:px-3.5 sm:py-2 rounded-lg text-xs font-semibold"
+                style={{ background: 'var(--red-bg)', border: '1px solid rgba(220,38,38,0.2)', color: 'var(--red)' }}
+              >
+                <Power className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Stop all</span>
+                <span className="sm:hidden">Stop</span>
+              </button>
+            )}
           </div>
         )}
 
-        {/* ─── SEARCH BAR + EXCHANGE FILTER ─── */}
-        <div className="card mb-4 !p-4" ref={searchContainerRef}>
-          <div className="flex flex-col sm:flex-row gap-3 sm:gap-2 sm:items-center">
-            <div className="relative min-w-0 w-full sm:w-[75%]">
-              <input
-                ref={searchInputRef}
-                type="text"
-                value={searchQuery}
-                onChange={(e) => { setSearchQuery(e.target.value); debouncedSearch(e.target.value); }}
-                onFocus={() => { if (searchResults.length > 0) setShowSearch(true); }}
-                onBlur={() => { setTimeout(() => setShowSearch(false), 180); }}
-                className="input-field !py-3 text-base font-semibold pr-10 w-full"
-                placeholder="Search symbols (e.g. RELIANCE)"
-                aria-autocomplete="list"
-                aria-controls={showSearch && searchResults.length > 0 ? 'search-results-listbox' : undefined}
-              />
-              <Search className={`absolute right-4 top-1/2 -translate-y-1/2 w-5 h-5 pointer-events-none ${isSearching ? 'animate-spin' : ''}`} style={{ color: 'var(--text-muted)' }} />
-            </div>
-            <div className="flex flex-row items-center gap-2 w-full sm:w-[25%] min-w-0">
-              <label htmlFor="search-exchange-filter" className="text-[10px] sm:text-xs font-medium uppercase tracking-wide flex-shrink-0 whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
-                Exchange
-              </label>
-              <select
-                id="search-exchange-filter"
-                value={searchExchangeFilter}
-                onChange={(e) => { const v = e.target.value as 'ALL' | 'NSE' | 'NFO' | 'BSE'; setSearchExchangeFilter(v); if (searchQuery.trim()) debouncedSearch(searchQuery); }}
-                className="input-field !py-2.5 sm:!py-3 text-sm font-medium rounded-lg cursor-pointer w-full min-w-0 flex-1"
-                style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-primary)' }}
-                title="Filter search results by exchange (All, NSE, NFO, BSE)"
-                aria-label="Filter search by exchange"
-              >
-                <option value="ALL">All</option>
-                <option value="NSE">NSE</option>
-                <option value="NFO">NFO</option>
-                <option value="BSE">BSE</option>
-              </select>
-            </div>
-          </div>
-          <div className="relative">
-
-            {((showSearch && searchResults.length > 0) || searchQuery.trim().length > 0) && (
-              <div id="search-results-listbox" className="absolute top-full left-0 right-0 mt-2 search-drop max-h-64 overflow-y-auto z-50 rounded-xl shadow-xl" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }} role="listbox">
-                {searchResults.length > 0 ? (
-                  searchResults.map((r, i) => (
-                    <button
-                      key={`${r.symbol}-${r.exchange || ''}-${i}`}
-                      type="button"
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => addSymbol(r)}
-                      className="w-full px-4 py-3 text-left transition-colors first:rounded-t-xl last:rounded-b-xl hover:bg-slate-100"
-                      style={{ borderBottom: '1px solid var(--border-subtle)' }}
-                      role="option"
-                      aria-selected={false}
-                    >
-                      <div className="flex justify-between items-center">
-                        <div>
-                          <span className="font-bold text-sm" style={{ color: 'var(--accent)' }}>{r.symbol}</span>
-                          <span className="text-sm ml-2" style={{ color: 'var(--text-secondary)' }}>{r.name}</span>
-                        </div>
-                        <div className="text-right">
-                          <span className="text-xs font-medium" style={{ color: 'var(--amber)' }}>{r.exchange}</span>
-                          <span className="text-xs ml-2" style={{ color: 'var(--text-muted)' }}>{r.currency}</span>
-                        </div>
-                      </div>
-                    </button>
-                  ))
-                ) : (
-                  <div className="px-4 py-4 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
-                    {isSearching ? 'Searching…' : 'No symbols found. Try e.g. RELIANCE or NIFTY 50.'}
-                  </div>
-                )}
+        {/* ─── SEARCH BAR + EXCHANGE FILTER (collapsible on mobile) ─── */}
+        <div className={`${showSearchMobile ? '' : 'hidden sm:block'} mb-3 sm:mb-4`}>
+          <div className="card !p-3 sm:!p-4" ref={searchContainerRef}>
+            <div className="flex flex-col sm:flex-row gap-2 sm:gap-2 sm:items-center">
+              <div className="relative min-w-0 w-full sm:w-[75%]">
+                <input
+                  ref={searchInputRef}
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => { setSearchQuery(e.target.value); debouncedSearch(e.target.value); }}
+                  onFocus={() => { if (searchResults.length > 0) setShowSearch(true); }}
+                  onBlur={() => { setTimeout(() => setShowSearch(false), 180); }}
+                  className="input-field !py-2.5 sm:!py-3 text-sm sm:text-base font-semibold pr-10 w-full"
+                  placeholder="Search symbols (e.g. RELIANCE)"
+                  aria-autocomplete="list"
+                  aria-controls={showSearch && searchResults.length > 0 ? 'search-results-listbox' : undefined}
+                />
+                <Search className={`absolute right-3 sm:right-4 top-1/2 -translate-y-1/2 w-4 h-4 sm:w-5 sm:h-5 pointer-events-none ${isSearching ? 'animate-spin' : ''}`} style={{ color: 'var(--text-muted)' }} />
               </div>
-            )}
+              <div className="flex flex-row items-center gap-2 w-full sm:w-[25%] min-w-0">
+                <label htmlFor="search-exchange-filter" className="text-[10px] sm:text-xs font-medium uppercase tracking-wide flex-shrink-0 whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
+                  Exchange
+                </label>
+                <select
+                  id="search-exchange-filter"
+                  value={searchExchangeFilter}
+                  onChange={(e) => { const v = e.target.value as 'ALL' | 'NSE' | 'NFO' | 'BSE'; setSearchExchangeFilter(v); if (searchQuery.trim()) debouncedSearch(searchQuery); }}
+                  className="input-field !py-2 sm:!py-3 text-sm font-medium rounded-lg cursor-pointer w-full min-w-0 flex-1"
+                  style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-primary)' }}
+                  title="Filter search results by exchange (All, NSE, NFO, BSE)"
+                  aria-label="Filter search by exchange"
+                >
+                  <option value="ALL">All</option>
+                  <option value="NSE">NSE</option>
+                  <option value="NFO">NFO</option>
+                  <option value="BSE">BSE</option>
+                </select>
+                {/* Close search on mobile */}
+                <button
+                  type="button"
+                  onClick={() => setShowSearchMobile(false)}
+                  className="sm:hidden p-2 rounded-lg flex-shrink-0"
+                  style={{ color: 'var(--text-muted)' }}
+                  aria-label="Close search"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+            <div className="relative">
+              {((showSearch && searchResults.length > 0) || searchQuery.trim().length > 0) && (
+                <div id="search-results-listbox" className="absolute top-full left-0 right-0 mt-2 search-drop max-h-64 overflow-y-auto z-50 rounded-xl shadow-xl" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }} role="listbox">
+                  {searchResults.length > 0 ? (
+                    searchResults.map((r, i) => (
+                      <button
+                        key={`${r.symbol}-${r.exchange || ''}-${i}`}
+                        type="button"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => { addSymbol(r); setShowSearchMobile(false); }}
+                        className="w-full px-4 py-3 text-left transition-colors first:rounded-t-xl last:rounded-b-xl hover:bg-slate-100"
+                        style={{ borderBottom: '1px solid var(--border-subtle)' }}
+                        role="option"
+                        aria-selected={false}
+                      >
+                        <div className="flex justify-between items-center gap-3">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span className="font-bold text-sm truncate" style={{ color: 'var(--accent)' }}>{r.symbol}</span>
+                              {(() => {
+                                const meta = getOptionMeta(r.symbol, r.exchange);
+                                if (!meta.isOption || !meta.side) return null;
+                                return (
+                                  <span
+                                    className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full flex-shrink-0"
+                                    style={{
+                                      background: meta.side === 'CE' ? 'rgba(59,130,246,0.15)' : 'rgba(248,113,113,0.15)',
+                                      color: meta.side === 'CE' ? '#1d4ed8' : '#b91c1c',
+                                    }}
+                                  >
+                                    {meta.side}
+                                  </span>
+                                );
+                              })()}
+                            </div>
+                            <span className="text-xs sm:text-sm block mt-0.5 truncate" style={{ color: 'var(--text-secondary)' }}>{r.name}</span>
+                          </div>
+                          <div className="text-right flex flex-col items-end gap-0.5 flex-shrink-0">
+                            <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full"
+                              style={{ background: 'rgba(251,191,36,0.15)', color: 'var(--amber)' }}>
+                              {r.exchange}
+                            </span>
+                            <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>{r.currency}</span>
+                          </div>
+                        </div>
+                      </button>
+                    ))
+                  ) : (
+                    <div className="px-4 py-4 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
+                      {isSearching ? 'Searching…' : 'No symbols found. Try e.g. RELIANCE or NIFTY 50.'}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
-        {/* ─── SYMBOL TABS + RESET ─── */}
-        <div className="card mb-4 !p-0 overflow-hidden">
+        {/* ─── SYMBOL PICKER (mobile: dropdown, desktop: tabs) ─── */}
+        {/* Mobile: single dropdown + actions, no horizontal scroll */}
+        <div className="card mb-4 !p-3 sm:hidden">
+          <div className="flex flex-col gap-2">
+            <div className="flex items-center gap-2">
+              <span className="text-[11px] font-medium uppercase tracking-wide flex-shrink-0" style={{ color: 'var(--text-muted)' }}>
+                Symbol
+              </span>
+              <div className="flex-1 min-w-0">
+                {symbols.length === 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => { setShowSearchMobile(true); setShowSearch(true); queueMicrotask(() => searchInputRef.current?.focus()); }}
+                    className="input-field flex items-center justify-between gap-2 text-sm font-semibold"
+                  >
+                    <span className="inline-flex items-center gap-1.5">
+                      <Plus className="w-4 h-4" />
+                      Add symbol
+                    </span>
+                  </button>
+                ) : (
+                  <select
+                    className="input-field text-sm font-semibold"
+                    value={displaySymbol ?? symbols[0].symbol}
+                    onChange={(e) => setSelectedSymbol(e.target.value)}
+                  >
+                    {symbols.map((s) => (
+                      <option key={s.symbol} value={s.symbol}>
+                        {s.symbol}
+                        {s.exchange ? ` · ${s.exchange}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => { setShowSearchMobile(true); setShowSearch(true); queueMicrotask(() => searchInputRef.current?.focus()); }}
+                className="px-3 py-2 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5"
+                style={{ borderColor: 'var(--border-subtle)', color: 'var(--accent)' }}
+              >
+                <Plus className="w-4 h-4" />
+                <span>New</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleReset}
+                className="px-3 py-2 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5"
+                style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-muted)' }}
+              >
+                <RefreshCw className="w-4 h-4" />
+                <span>Reset</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Desktop / tablet: tab strip */}
+        <div className="card mb-4 !p-0 overflow-hidden hidden sm:block">
           <div className="flex border-b overflow-x-auto no-scrollbar" style={{ borderColor: 'var(--border-subtle)', WebkitOverflowScrolling: 'touch' }}>
             {symbols.map((s) => (
               <div
@@ -1162,10 +1311,30 @@ export default function EMAAlertSystem() {
                   background: selectedSymbol === s.symbol ? 'rgba(14,165,233,0.06)' : 'transparent',
                 }}
               >
-                <span className="truncate">{s.symbol}</span>
-                {(s.exchange && s.exchange !== 'NSE') && (
-                  <span className="text-xs font-medium opacity-80 flex-shrink-0" style={{ color: 'var(--amber)' }}>({s.exchange})</span>
-                )}
+                <div className="flex items-center gap-1.5 min-w-0">
+                  <span className="truncate">{s.symbol}</span>
+                  {(s.exchange && s.exchange !== 'NSE') && (
+                    <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full flex-shrink-0"
+                      style={{ background: 'rgba(251,191,36,0.15)', color: 'var(--amber)' }}>
+                      {s.exchange}
+                    </span>
+                  )}
+                  {(() => {
+                    const meta = getOptionMeta(s.symbol, s.exchange);
+                    if (!meta.isOption) return null;
+                    return meta.side ? (
+                      <span
+                        className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full flex-shrink-0"
+                        style={{
+                          background: meta.side === 'CE' ? 'rgba(59,130,246,0.15)' : 'rgba(248,113,113,0.15)',
+                          color: meta.side === 'CE' ? '#1d4ed8' : '#b91c1c',
+                        }}
+                      >
+                        {meta.side}
+                      </span>
+                    ) : null;
+                  })()}
+                </div>
                 {!monitoredSymbols.has(s.symbol) && (
                   <button
                     type="button"
@@ -1181,23 +1350,23 @@ export default function EMAAlertSystem() {
             ))}
             <button
               type="button"
-              onClick={() => { setShowSearch(true); queueMicrotask(() => searchInputRef.current?.focus()); }}
-              className="flex items-center gap-2 px-4 py-3.5 min-h-[48px] text-sm font-semibold transition-colors border-b-2 flex-shrink-0 touch-manipulation"
+              onClick={() => { setShowSearchMobile(true); setShowSearch(true); queueMicrotask(() => searchInputRef.current?.focus()); }}
+              className="flex items-center gap-2 px-4 py-3 sm:py-3.5 min-h-[44px] sm:min-h-[48px] text-sm font-semibold transition-colors border-b-2 flex-shrink-0 touch-manipulation"
               style={{ color: 'var(--accent)', borderBottomColor: 'transparent', background: 'transparent' }}
-              title="Open new symbol tab (like a new browser tab)"
+              title="Add new symbol"
             >
               <Plus className="w-4 h-4" />
-              <span>New</span>
+              <span className="hidden sm:inline">New</span>
             </button>
             <button
               type="button"
               onClick={handleReset}
-              className="flex items-center justify-center gap-1.5 px-4 sm:px-5 py-3.5 min-h-[48px] text-sm font-semibold transition-colors hover:bg-slate-100 flex-shrink-0 touch-manipulation"
+              className="flex items-center justify-center gap-1.5 px-3 sm:px-5 py-3 sm:py-3.5 min-h-[44px] sm:min-h-[48px] text-sm font-semibold transition-colors hover:bg-slate-100 flex-shrink-0 touch-manipulation"
               style={{ color: 'var(--text-muted)', borderLeft: '1px solid var(--border-subtle)' }}
               title="Stop monitoring and clear live data (keeps symbols and EMA setup)"
             >
               <RefreshCw className="w-4 h-4" />
-              <span>Reset</span>
+              <span className="hidden sm:inline">Reset</span>
             </button>
           </div>
         </div>
@@ -1205,7 +1374,45 @@ export default function EMAAlertSystem() {
         {/* ─── TIMEFRAME + PRICE ─── */}
         <div className="card mb-4 !p-3 sm:!p-4">
           <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center sm:justify-between gap-3">
-            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1" style={{ WebkitOverflowScrolling: 'touch' }}>
+            {/* Mobile: compact grid, no horizontal scroll */}
+            <div className="grid grid-cols-4 gap-2 sm:hidden">
+              {TIMEFRAMES.map((tf) => {
+                const isActive = displayTimeframe === tf.id;
+                return (
+                  <button
+                    key={tf.id}
+                    onClick={() => {
+                      if (!displaySymbol) return;
+                      const oldTf = getTimeframe(displaySymbol);
+                      const isMonitored = monitoredSymbols.has(displaySymbol);
+                      if (isMonitored && oldTf !== tf.id) {
+                        axios.delete('/api/monitor', { data: { symbol: displaySymbol, timeframe: oldTf } }).catch(() => { });
+                        setMonitoredSymbols((prev) => {
+                          const next = new Set(prev);
+                          next.delete(displaySymbol);
+                          return next;
+                        });
+                        if (userId) refetchWatches();
+                        const oldKey = watchKey(displaySymbol, oldTf);
+                        setPriceByKey((prev) => { const n = { ...prev }; delete n[oldKey]; return n; });
+                        setEmaByKey((prev) => { const n = { ...prev }; delete n[oldKey]; return n; });
+                        setWarmupByKey((prev) => { const n = { ...prev }; delete n[oldKey]; return n; });
+                        setMonitorStatus(`Monitoring stopped — start again to use ${tf.id}`);
+                        setTimeout(() => setMonitorStatus(''), 4000);
+                      }
+                      setTimeframeBySymbol((prev) => ({ ...prev, [displaySymbol]: tf.id }));
+                    }}
+                    disabled={!displaySymbol}
+                    className={`tf-btn !px-2.5 !py-2 min-h-[40px] text-sm touch-manipulation ${isActive ? 'active' : ''}`}
+                  >
+                    {tf.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Desktop / tablet: horizontal pill row */}
+            <div className="hidden sm:flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1" style={{ WebkitOverflowScrolling: 'touch' }}>
               {TIMEFRAMES.map((tf) => (
                 <button
                   key={tf.id}
@@ -1214,7 +1421,7 @@ export default function EMAAlertSystem() {
                     const oldTf = getTimeframe(displaySymbol);
                     const isMonitored = monitoredSymbols.has(displaySymbol);
                     if (isMonitored && oldTf !== tf.id) {
-                      axios.delete('/api/monitor', { data: { symbol: displaySymbol, timeframe: oldTf } }).catch(() => {});
+                      axios.delete('/api/monitor', { data: { symbol: displaySymbol, timeframe: oldTf } }).catch(() => { });
                       setMonitoredSymbols((prev) => {
                         const next = new Set(prev);
                         next.delete(displaySymbol);
@@ -1244,7 +1451,24 @@ export default function EMAAlertSystem() {
                   <RefreshCw className="w-5 h-5 animate-spin flex-shrink-0" style={{ color: 'var(--accent)' }} />
                 ) : displayPrice ? (
                   <>
-                    <span className="text-sm font-medium flex-shrink-0" style={{ color: 'var(--text-muted)' }}>{displaySymbol}</span>
+                    <div className="flex items-center gap-1.5 flex-shrink-0 min-w-0">
+                      <span className="text-sm font-medium truncate" style={{ color: 'var(--text-muted)' }}>{displaySymbol}</span>
+                      {(() => {
+                        const meta = getOptionMeta(displaySymbol, getExchange(displaySymbol));
+                        if (!meta.isOption || !meta.side) return null;
+                        return (
+                          <span
+                            className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full flex-shrink-0"
+                            style={{
+                              background: meta.side === 'CE' ? 'rgba(59,130,246,0.15)' : 'rgba(248,113,113,0.15)',
+                              color: meta.side === 'CE' ? '#1d4ed8' : '#b91c1c',
+                            }}
+                          >
+                            {meta.side}
+                          </span>
+                        );
+                      })()}
+                    </div>
                     <span className="text-xl sm:text-2xl font-extrabold tracking-tight truncate" style={{ color: 'var(--text-primary)' }}>
                       {getCurrencySymbol(displayPrice.currency)}{displayPrice.price.toFixed(2)}
                     </span>
@@ -1260,6 +1484,14 @@ export default function EMAAlertSystem() {
                       </span>
                     </div>
                   </>
+                ) : displayPriceError ? (
+                  <div className="flex items-center gap-2 text-xs sm:text-sm">
+                    <span className="px-2 py-1 rounded-lg font-medium flex items-center gap-1.5"
+                      style={{ background: 'var(--red-bg)', color: 'var(--red)', border: '1px solid rgba(220,38,38,0.25)' }}>
+                      <X className="w-3.5 h-3.5" />
+                      {displayPriceError}
+                    </span>
+                  </div>
                 ) : null}
               </div>
             )}
@@ -1267,135 +1499,170 @@ export default function EMAAlertSystem() {
         </div>
 
         {/* ─── MAIN CONTENT ─── */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4">
 
-          {/* ─── LEFT: EMA Config ─── */}
+          {/* ─── LEFT: EMA Config (collapsible on mobile) ─── */}
           <div className="lg:col-span-5">
             <div className="card !p-3 sm:!p-5">
-              <div className="flex items-center justify-between gap-2 mb-4 min-w-0">
+              <button
+                type="button"
+                onClick={() => setShowEmaConfig(!showEmaConfig)}
+                className="lg:pointer-events-none w-full flex items-center justify-between gap-2 min-w-0"
+              >
                 <div className="section-label flex items-center gap-2 min-w-0">
                   <BarChart3 className="w-4 h-4 flex-shrink-0" style={{ color: 'var(--accent)' }} />
                   <span className="truncate">EMA Periods {displaySymbol && <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>({displaySymbol})</span>}</span>
                 </div>
-                <span className="badge flex-shrink-0" style={{ background: 'rgba(14,165,233,0.08)', color: 'var(--accent)' }}>{emas.length}</span>
-              </div>
-
-              {/* Quick add — horizontal scroll on narrow screens */}
-              <div className="flex gap-2 mb-4 overflow-x-auto no-scrollbar pb-1" style={{ WebkitOverflowScrolling: 'touch' }}>
-                {[9, 21, 50, 100, 200].map((p) => (
-                  <button key={p} onClick={() => addEma(p)}
-                    disabled={!displaySymbol || !!emas.find((e) => e.period === p)}
-                    className="ema-quick flex-shrink-0 min-w-[44px] text-sm touch-manipulation">
-                    {p}
-                  </button>
-                ))}
-                <button onClick={() => setShowAddEma(!showAddEma)}
-                  disabled={!displaySymbol}
-                  className="flex items-center justify-center w-11 min-w-[44px] min-h-[44px] rounded-lg transition-colors disabled:opacity-50 flex-shrink-0 touch-manipulation"
-                  style={{ background: 'var(--bg-elevated)', border: '1px dashed var(--border-medium)', color: 'var(--text-secondary)' }}>
-                  <Plus className="w-4 h-4" />
-                </button>
-              </div>
-
-              {showAddEma && (
-                <div className="flex gap-2 mb-4 anim-fade-up">
-                  <input type="number" value={newEmaPeriod} onChange={(e) => setNewEmaPeriod(e.target.value)}
-                    className="input-field flex-1 text-sm" placeholder="Custom period" min="1" />
-                  <button onClick={() => addEma()} disabled={!newEmaPeriod || parseInt(newEmaPeriod) <= 0}
-                    className="px-5 py-2.5 rounded-lg text-sm font-bold transition-all disabled:opacity-30"
-                    style={{ background: 'var(--accent)', color: '#ffffff' }}>
-                    Add
-                  </button>
+                <div className="flex items-center gap-2">
+                  <span className="badge flex-shrink-0" style={{ background: 'rgba(14,165,233,0.08)', color: 'var(--accent)' }}>{emas.length}</span>
+                  <span className="lg:hidden text-xs" style={{ color: 'var(--text-muted)' }}>{showEmaConfig ? '▲' : '▼'}</span>
                 </div>
-              )}
-
-              {/* EMA list */}
-              {!displaySymbol ? (
-                <div className="text-center py-6" style={{ color: 'var(--text-muted)' }}>
-                  <BarChart3 className="w-8 h-8 mx-auto mb-2 opacity-30" />
-                  <p className="text-sm font-medium">Select a symbol above</p>
-                  <p className="text-xs mt-1 opacity-60">to set EMAs for that stock</p>
-                </div>
-              ) : emas.length === 0 ? (
-                <div className="text-center py-6" style={{ color: 'var(--text-muted)' }}>
-                  <BarChart3 className="w-8 h-8 mx-auto mb-2 opacity-30" />
-                  <p className="text-sm font-medium">Add at least 2 EMAs for {displaySymbol}</p>
-                  <p className="text-xs mt-1 opacity-60">to start monitoring crossovers</p>
-                </div>
-              ) : (
-                <div className="space-y-2 mb-4">
-                  {emas.map((ema) => (
-                    <div key={ema.id} className="flex items-center justify-between px-4 py-3 rounded-xl" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}>
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: ema.color, boxShadow: `0 0 8px ${ema.color}50` }} />
-                        <span className="font-bold text-sm" style={{ color: 'var(--text-primary)' }}>EMA({ema.period})</span>
-                        {displayEmaValues[ema.period] != null && (
-                          <span className="text-sm font-mono" style={{ color: 'var(--text-muted)' }}>= {displayEmaValues[ema.period]!.toFixed(2)}</span>
-                        )}
-                        {displayWarmupProgress[ema.period] !== undefined && displayWarmupProgress[ema.period] < 1 && (
-                          <div className="flex items-center gap-2">
-                            <div className="w-16 h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border-subtle)' }}>
-                              <div className="h-full rounded-full transition-all duration-500" style={{ width: `${displayWarmupProgress[ema.period] * 100}%`, background: 'var(--accent)' }} />
-                            </div>
-                            <span className="text-xs font-mono" style={{ color: 'var(--text-muted)' }}>{Math.round(displayWarmupProgress[ema.period] * 100)}%</span>
-                          </div>
-                        )}
-                      </div>
-                      <button onClick={() => removeEma(ema.id)} className="p-1.5 rounded-lg transition-colors hover:bg-red-50 flex-shrink-0"
-                        style={{ color: 'var(--text-muted)' }}
-                        onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--red)')}
-                        onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-muted)')}>
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <div className="h-px my-4" style={{ background: 'var(--border-subtle)' }} />
-
-              {/* Monitoring Controls — which crossovers to alert on */}
-              <div className="flex gap-2 mb-4">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTrackBullish(!trackBullish);
-                    stopAllMonitoringFromConfigChange();
-                  }}
-                  className={`toggle-btn text-sm min-h-[48px] touch-manipulation ${trackBullish ? 'bull-on' : ''}`}
-                  aria-pressed={trackBullish}
-                  aria-label={trackBullish ? 'Alert on bullish crossovers (on)' : 'Alert on bullish crossovers (off)'}
-                >
-                  <TrendingUp className="w-4 h-4 flex-shrink-0" />
-                  <span>Bullish</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTrackBearish(!trackBearish);
-                    stopAllMonitoringFromConfigChange();
-                  }}
-                  className={`toggle-btn text-sm min-h-[48px] touch-manipulation ${trackBearish ? 'bear-on' : ''}`}
-                  aria-pressed={trackBearish}
-                  aria-label={trackBearish ? 'Alert on bearish crossovers (on)' : 'Alert on bearish crossovers (off)'}
-                >
-                  <TrendingDown className="w-4 h-4 flex-shrink-0" />
-                  <span>Bearish</span>
-                </button>
-              </div>
-
-              <button
-                onClick={displaySymbol && monitoredSymbols.has(displaySymbol) ? () => stopMonitoringForSymbol(displaySymbol) : () => displaySymbol && startMonitoringForSymbol(displaySymbol)}
-                disabled={!displaySymbol || (emasBySymbol[displaySymbol] ?? []).length < 2}
-                className={`cta text-base ${displaySymbol && monitoredSymbols.has(displaySymbol) ? 'halt' : 'go'}`}>
-                {displaySymbol && monitoredSymbols.has(displaySymbol) ? (
-                  <><Power className="w-5 h-5" /> Stop monitoring {displaySymbol}</>
-                ) : (
-                  <><Zap className="w-5 h-5" /> Start monitoring {displaySymbol || '…'}</>
-                )}
               </button>
-            </div>
-          </div>
+
+              <div className={`${showEmaConfig ? '' : 'hidden lg:block'} mt-4`}>
+
+                {/* Quick add — horizontal scroll on narrow screens */}
+                <div className="flex gap-2 mb-3 sm:mb-4 overflow-x-auto no-scrollbar pb-1" style={{ WebkitOverflowScrolling: 'touch' }}>
+                  {[9, 21, 50, 100, 200].map((p) => (
+                    <button key={p} onClick={() => addEma(p)}
+                      disabled={!displaySymbol || !!emas.find((e) => e.period === p)}
+                      className="ema-quick flex-shrink-0 min-w-[40px] sm:min-w-[44px] text-sm touch-manipulation">
+                      {p}
+                    </button>
+                  ))}
+                  <button onClick={() => setShowAddEma(!showAddEma)}
+                    disabled={!displaySymbol}
+                    className="flex items-center justify-center w-10 sm:w-11 min-w-[40px] sm:min-w-[44px] min-h-[40px] sm:min-h-[44px] rounded-lg transition-colors disabled:opacity-50 flex-shrink-0 touch-manipulation"
+                    style={{ background: 'var(--bg-elevated)', border: '1px dashed var(--border-medium)', color: 'var(--text-secondary)' }}>
+                    <Plus className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {showAddEma && (
+                  <div className="flex gap-2 mb-4 anim-fade-up">
+                    <input type="number" value={newEmaPeriod} onChange={(e) => setNewEmaPeriod(e.target.value)}
+                      className="input-field flex-1 text-sm" placeholder="Custom period" min="1" />
+                    <button onClick={() => addEma()} disabled={!newEmaPeriod || parseInt(newEmaPeriod) <= 0}
+                      className="px-5 py-2.5 rounded-lg text-sm font-bold transition-all disabled:opacity-30"
+                      style={{ background: 'var(--accent)', color: '#ffffff' }}>
+                      Add
+                    </button>
+                  </div>
+                )}
+
+                {/* EMA list */}
+                {!displaySymbol ? (
+                  <div className="text-center py-6" style={{ color: 'var(--text-muted)' }}>
+                    <BarChart3 className="w-8 h-8 mx-auto mb-2 opacity-30" />
+                    <p className="text-sm font-medium">Select a symbol above</p>
+                    <p className="text-xs mt-1 opacity-60">to set EMAs for that stock</p>
+                  </div>
+                ) : emas.length === 0 ? (
+                  <div className="text-center py-6" style={{ color: 'var(--text-muted)' }}>
+                    <BarChart3 className="w-8 h-8 mx-auto mb-2 opacity-30" />
+                    <p className="text-sm font-medium">Add at least 2 EMAs for {displaySymbol}</p>
+                    <p className="text-xs mt-1 opacity-60">to start monitoring crossovers</p>
+                  </div>
+                ) : (
+                  <div className="space-y-2 mb-4">
+                    {emas.map((ema) => (
+                      <div key={ema.id} className="flex items-center justify-between px-4 py-3 rounded-xl" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}>
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: ema.color, boxShadow: `0 0 8px ${ema.color}50` }} />
+                          <span className="font-bold text-sm" style={{ color: 'var(--text-primary)' }}>EMA({ema.period})</span>
+                          {displayEmaValues[ema.period] != null && (
+                            <span className="text-sm font-mono" style={{ color: 'var(--text-muted)' }}>= {displayEmaValues[ema.period]!.toFixed(2)}</span>
+                          )}
+                          {displayWarmupProgress[ema.period] !== undefined && displayWarmupProgress[ema.period] < 1 && (
+                            <div className="flex items-center gap-2">
+                              <div className="w-16 h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border-subtle)' }}>
+                                <div className="h-full rounded-full transition-all duration-500" style={{ width: `${displayWarmupProgress[ema.period] * 100}%`, background: 'var(--accent)' }} />
+                              </div>
+                              <span className="text-xs font-mono" style={{ color: 'var(--text-muted)' }}>{Math.round(displayWarmupProgress[ema.period] * 100)}%</span>
+                            </div>
+                          )}
+                        </div>
+                        <button onClick={() => removeEma(ema.id)} className="p-1.5 rounded-lg transition-colors hover:bg-red-50 flex-shrink-0"
+                          style={{ color: 'var(--text-muted)' }}
+                          onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--red)')}
+                          onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-muted)')}>
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="h-px my-4" style={{ background: 'var(--border-subtle)' }} />
+
+                {/* Monitoring Controls — which crossovers to alert on */}
+                <div className="flex gap-2 mb-4">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTrackBullish(!trackBullish);
+                      stopAllMonitoringFromConfigChange();
+                    }}
+                    className={`toggle-btn text-sm min-h-[48px] touch-manipulation ${trackBullish ? 'bull-on' : ''}`}
+                    aria-pressed={trackBullish}
+                    aria-label={trackBullish ? 'Alert on bullish crossovers (on)' : 'Alert on bullish crossovers (off)'}
+                  >
+                    <TrendingUp className="w-4 h-4 flex-shrink-0" />
+                    <span>Bullish</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTrackBearish(!trackBearish);
+                      stopAllMonitoringFromConfigChange();
+                    }}
+                    className={`toggle-btn text-sm min-h-[48px] touch-manipulation ${trackBearish ? 'bear-on' : ''}`}
+                    aria-pressed={trackBearish}
+                    aria-label={trackBearish ? 'Alert on bearish crossovers (on)' : 'Alert on bearish crossovers (off)'}
+                  >
+                    <TrendingDown className="w-4 h-4 flex-shrink-0" />
+                    <span>Bearish</span>
+                  </button>
+                </div>
+
+                <button
+                  onClick={() => {
+                    if (restoringWatches) {
+                      setMonitorStatus('Restoring existing monitoring from server — please wait until this finishes before changing monitors.');
+                      return;
+                    }
+                    if (monitoringBusy) {
+                      setMonitorStatus('Monitoring is already starting — please wait until it finishes before pressing the button again.');
+                      return;
+                    }
+                    if (!displaySymbol) {
+                      setMonitorStatus('Add at least one symbol to start monitoring.');
+                      return;
+                    }
+                    const count = (emasBySymbol[displaySymbol] ?? []).length;
+                    if (count < 2 && !monitoredSymbols.has(displaySymbol)) {
+                      setMonitorStatus(`${displaySymbol}: add at least 2 EMAs before starting monitoring.`);
+                      return;
+                    }
+                    if (monitoredSymbols.has(displaySymbol)) {
+                      stopMonitoringForSymbol(displaySymbol);
+                    } else {
+                      startMonitoringForSymbol(displaySymbol);
+                    }
+                  }}
+                  disabled={monitoringBusy || restoringWatches}
+                  className={`cta text-base ${displaySymbol && monitoredSymbols.has(displaySymbol) ? 'halt' : 'go'} ${
+                    monitoringBusy || restoringWatches ? 'opacity-70 cursor-not-allowed' : ''
+                  }`}>
+                  {displaySymbol && monitoredSymbols.has(displaySymbol) ? (
+                    <><Power className="w-5 h-5" /> Stop monitoring {displaySymbol}</>
+                  ) : (
+                    <><Zap className="w-5 h-5" /> Start monitoring {displaySymbol || '…'}</>
+                  )}
+                </button>
+              </div>{/* end collapsible */}
+            </div>{/* end card */}
+          </div>{/* end lg:col-span-5 */}
 
           {/* ─── RIGHT: Pairs + Alerts ─── */}
           <div className="lg:col-span-7 space-y-4">

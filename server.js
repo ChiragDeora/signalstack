@@ -38,7 +38,7 @@ app.prepare().then(async () => {
   // Let Next.js handle all routes (catch-all). Avoid server.all('*') — Express 5 path-to-regexp rejects bare '*'.
   server.use((req, res) => handle(req, res));
 
-  const PORT = process.env.PORT || 3000;
+  const PORT = process.env.PORT || 3005;
   const HOST = process.env.HOST || '0.0.0.0';
   httpServer.listen(PORT, HOST, (err) => {
     if (err) throw err;

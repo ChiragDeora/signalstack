@@ -28,7 +28,7 @@ export async function getOrCreateCrossoverService(): Promise<CrossoverService> {
     await svc.restoreAllWatches(configs);
     const subs = await getAllPushSubscriptions();
     for (const sub of subs) {
-      svc.addPushSubscription(sub);
+      svc.addPushSubscription(sub, sub.userId);
     }
     if (subs.length > 0) {
       console.log(`🔔 Restored ${subs.length} push subscription(s)`);

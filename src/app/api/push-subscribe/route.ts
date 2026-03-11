@@ -26,7 +26,7 @@ export async function POST(req: NextRequest) {
       },
     };
     const svc = await getOrCreateCrossoverService();
-    svc.addPushSubscription(subData);
+    svc.addPushSubscription(subData, userId ?? undefined);
     await savePushSubscription(subData, userId ?? null).catch((e) => console.warn('Persist push subscription failed:', e?.message));
 
     // Send a test push immediately so the user sees a browser notification right away

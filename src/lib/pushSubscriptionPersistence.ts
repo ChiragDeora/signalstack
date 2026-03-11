@@ -20,13 +20,14 @@ function rowToSub(row: SubRow): PushSubscriptionData {
       p256dh: row.keys_p256dh,
       auth: row.keys_auth,
     },
+    userId: row.user_id ?? undefined,
   };
 }
 
 export async function getAllPushSubscriptions(): Promise<PushSubscriptionData[]> {
   const supabase = getSupabaseAdmin();
   if (!supabase) return [];
-  const { data, error } = await supabase.from('push_subscriptions').select('endpoint, keys_p256dh, keys_auth');
+  const { data, error } = await supabase.from('push_subscriptions').select('endpoint, keys_p256dh, keys_auth, user_id');
   if (error) {
     console.warn('pushSubscriptionPersistence: read failed', error.message);
     return [];

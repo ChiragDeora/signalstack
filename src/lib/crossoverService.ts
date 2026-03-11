@@ -19,7 +19,7 @@ import {
   getAlertRecipientEmails,
 } from './brevoEmail';
 import { getClerkUserEmail } from './clerkUserEmail';
-import { isMarketOpen } from './marketHours';
+// marketHours removed — alerts now fire regardless of trading hours
 
 // web-push is optional — only needed for push notifications (see OpenReplay Web Push guide)
 let webpush: any = null;
@@ -38,10 +38,8 @@ try {
   console.log('⚠️  web-push not installed — push notifications disabled');
 }
 
-const REAL_TIME_POLL_MS = 30_000; // Poll all timeframes every 30s; alerts within ~30s. With 30s: up to 90 total watches (e.g. 30/user for 3 users). Angel One: getCandleData 3/sec, 180/min. See: https://smartapi.angelone.in/smartapi/forum/topic/4387/changes-in-api-rate-limit
-const MAX_WATCHES_PER_USER = 100; // Max symbols×timeframes one user can monitor (segregates API poll load)
-/** Short dedupe: one email/push per (symbol, timeframe, type) per 2 min — stops LTP wobble from sending many emails for the same crossover; you still get an alert for every new crossover after that. */
-const ALERT_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
+const REAL_TIME_POLL_MS = 30_000;
+const MAX_WATCHES_PER_USER = 100;
 
 function watchJobKey(config: WatchConfig): string {
   const sym = config.symbol.toUpperCase();
@@ -67,8 +65,6 @@ export class CrossoverService {
   private pushSubscriptions: Map<string, PushSubscriptionData> = new Map();
   private onSubscriptionExpired?: OnSubscriptionExpired;
   private initialized = false;
-  /** Last time we sent email/push for (symbol:timeframe:type) — used to avoid duplicate alerts */
-  private lastSentAlertTime: Map<string, number> = new Map();
 
   constructor(io: any, options?: { onSubscriptionExpired?: OnSubscriptionExpired }) {
     this.io = io;
@@ -125,6 +121,15 @@ export class CrossoverService {
 
       if (priceData?.candleData && priceData.candleData.length > 0) {
         this.engine.warmUp(config.symbol, config.timeframe, priceData.candleData, config.userId);
+
+        // Silent seed tick: feed current LTP so lastRelation matches live data
+        // and the first real poll doesn't produce a false crossover.
+        if (priceData.price > 0) {
+          this.engine.processTick(
+            config.symbol, config.timeframe, priceData.price,
+            priceData.currency, priceData.source, config.userId,
+          ); // discard returned alerts — they are warmup artefacts
+        }
 
         // Emit initial price and EMA data
         this.emitPriceUpdate(config.symbol, config.timeframe, priceData);
@@ -244,27 +249,16 @@ export class CrossoverService {
 
   /**
    * Handle detected crossover alerts. When userId is set, fetches that user's email from Clerk and sends the alert there too.
-   * Email and push are rate-limited per (symbol, timeframe, type) and only sent when market is open (no emails when market closed).
+   * Every genuine crossover triggers an immediate alert — the CrossoverDetector's lastRelation tracking prevents duplicates.
    */
-  private handleAlerts(alerts: CrossoverAlert[], userId?: string, exchange?: string): void {
+  private handleAlerts(alerts: CrossoverAlert[], userId?: string, _exchange?: string): void {
     const userEmailPromise =
       userId && alerts.length > 0 ? getClerkUserEmail(userId) : Promise.resolve(null);
-    const now = Date.now();
-    const marketOpen = isMarketOpen(exchange ?? 'NSE');
     for (const alert of alerts) {
       addAlert(alert);
       this.io?.emit('alert:crossover', alert);
 
-      if (!marketOpen) continue; // Do not send email or push when market is closed
-
-      const cooldownKey = `${alert.symbol}:${alert.timeframe}:${alert.crossoverType}`;
-      const lastSent = this.lastSentAlertTime.get(cooldownKey) ?? 0;
-      if (now - lastSent < ALERT_COOLDOWN_MS) {
-        continue; // Skip email and push — same crossover already notified recently
-      }
-      this.lastSentAlertTime.set(cooldownKey, now);
-
-      this.sendPushNotification(alert);
+      this.sendPushNotification(alert, userId);
       userEmailPromise.then((email) => sendCrossoverAlertEmail(alert, email)).catch((e) =>
         console.warn('Crossover email alert failed:', e),
       );
@@ -318,16 +312,17 @@ export class CrossoverService {
   // Push Notification Methods
   // =========================
 
-  addPushSubscription(sub: PushSubscriptionData): void {
-    this.pushSubscriptions.set(sub.endpoint, sub);
-    console.log(`🔔 Push subscription added (total: ${this.pushSubscriptions.size})`);
+  addPushSubscription(sub: PushSubscriptionData, userId?: string): void {
+    const stored = { ...sub, userId: userId ?? sub.userId };
+    this.pushSubscriptions.set(sub.endpoint, stored);
+    console.log(`🔔 Push subscription added for user ${stored.userId ?? '(anonymous)'} (total: ${this.pushSubscriptions.size})`);
   }
 
   removePushSubscription(endpoint: string): void {
     this.pushSubscriptions.delete(endpoint);
   }
 
-  private async sendPushNotification(alert: CrossoverAlert): Promise<void> {
+  private async sendPushNotification(alert: CrossoverAlert, userId?: string): Promise<void> {
     if (!webpush || this.pushSubscriptions.size === 0) return;
 
     const emoji = alert.crossoverType === 'bullish' ? '📈' : '📉';
@@ -339,7 +334,13 @@ export class CrossoverService {
     });
 
     const options = { TTL: 86400, urgency: 'high' as const };
-    const promises = [...this.pushSubscriptions.entries()].map(async ([endpoint, sub]) => {
+    // Only send to subscriptions belonging to the user whose watch triggered the alert
+    const targets = [...this.pushSubscriptions.entries()].filter(([, sub]) => {
+      if (!userId) return true; // no userId attached to watch — send to all (legacy)
+      if (!sub.userId) return true; // subscription has no user — send (legacy device)
+      return sub.userId === userId;
+    });
+    const promises = targets.map(async ([endpoint, sub]) => {
       try {
         await webpush.sendNotification(sub, payload, options);
       } catch (err: any) {

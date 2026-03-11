@@ -98,6 +98,7 @@ export interface PushSubscriptionData {
     p256dh: string;
     auth: string;
   };
+  userId?: string; // Clerk user id — used to scope push notifications per user
 }
 
 // Socket.IO event payloads

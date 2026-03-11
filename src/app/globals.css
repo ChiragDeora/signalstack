@@ -33,7 +33,7 @@
 }
 
 body {
-  background: var(--bg-primary);
+  background: radial-gradient(circle at top left, #e0f2fe 0, #eff6ff 28%, #f8fafc 60%, #f9fafb 100%);
   color: var(--text-primary);
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   min-height: 100vh;
@@ -48,6 +48,7 @@ body {
   padding-top: max(1rem, env(safe-area-inset-top, 0px));
   padding-bottom: max(1rem, env(safe-area-inset-bottom, 0px));
 }
+
 @media (min-width: 640px) {
   .safe-area-inset {
     padding-left: max(1.5rem, env(safe-area-inset-left, 0px));
@@ -56,6 +57,7 @@ body {
     padding-bottom: max(1.25rem, env(safe-area-inset-bottom, 0px));
   }
 }
+
 @media (min-width: 1024px) {
   .safe-area-inset {
     padding-left: max(2rem, env(safe-area-inset-left, 0px));
@@ -80,10 +82,13 @@ body {
 /* ===== CARD ===== */
 .card {
   background: var(--bg-card);
-  border: 1px solid var(--border-subtle);
-  border-radius: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 18px;
   padding: 24px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  box-shadow:
+    0 18px 60px rgba(15, 23, 42, 0.16),
+    0 0 0 1px rgba(255, 255, 255, 0.6) inset;
+  backdrop-filter: blur(18px);
 }
 
 /* ===== TIMEFRAME BUTTON ===== */
@@ -92,16 +97,17 @@ body {
   border-radius: 8px;
   font-size: 13px;
   font-weight: 600;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-  color: var(--text-muted);
+  background: rgba(148, 163, 184, 0.12);
+  border: 1px solid transparent;
+  color: var(--text-secondary);
   cursor: pointer;
   transition: all 0.15s ease;
+  text-align: center;
 }
 
 .tf-btn:hover {
-  background: var(--border-subtle);
-  color: var(--text-secondary);
+  background: rgba(148, 163, 184, 0.2);
+  color: var(--text-primary);
 }
 
 .tf-btn.active {
@@ -117,8 +123,8 @@ body {
   border-radius: 10px;
   font-size: 14px;
   font-weight: 700;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-medium);
+  background: rgba(148, 163, 184, 0.04);
+  border: 1px dashed rgba(148, 163, 184, 0.4);
   color: var(--text-secondary);
   cursor: pointer;
   transition: all 0.15s ease;
@@ -142,9 +148,9 @@ body {
   border-radius: 10px;
   font-size: 13px;
   font-weight: 600;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-  color: var(--text-muted);
+  background: rgba(148, 163, 184, 0.06);
+  border: 1px solid transparent;
+  color: var(--text-secondary);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -155,13 +161,13 @@ body {
 
 .toggle-btn.bull-on {
   background: var(--green-bg);
-  border-color: var(--green);
+  border-color: rgba(16, 185, 129, 0.8);
   color: var(--green);
 }
 
 .toggle-btn.bear-on {
   background: var(--red-bg);
-  border-color: var(--red);
+  border-color: rgba(248, 113, 113, 0.8);
   color: var(--red);
 }
 
@@ -254,9 +260,9 @@ body {
 }
 
 .input-field {
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  border-radius: 12px;
   color: var(--text-primary);
   padding: 10px 14px;
   font-size: 15px;
@@ -300,28 +306,50 @@ body {
   scrollbar-width: none;
 }
 
-/* Mobile touch targets */
+/* Mobile touch targets + compact layout */
 @media (max-width: 640px) {
   .tf-btn {
-    min-height: 36px;
-    min-width: 36px;
+    min-height: 40px;
+    min-width: 40px;
+    padding: 6px 12px;
+    font-size: 13px;
   }
 
   .ema-quick {
     min-height: 40px;
+    padding: 6px 0;
+    font-size: 13px;
   }
 
   .toggle-btn {
     min-height: 44px;
+    padding: 8px;
+    font-size: 13px;
   }
 
   .cta {
-    min-height: 48px;
+    min-height: 44px;
+    padding: 12px;
+    font-size: 15px;
   }
 
   .card {
-    border-radius: 12px;
-    padding: 16px;
+    border-radius: 20px;
+    padding: 14px;
+  }
+
+  .section-label {
+    font-size: 13px;
+  }
+
+  .badge {
+    font-size: 10px;
+    padding: 2px 8px;
+  }
+
+  .input-field {
+    padding: 8px 12px;
+    font-size: 14px;
   }
 }
 
