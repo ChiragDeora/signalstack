@@ -466,10 +466,31 @@ export default function EMAAlertSystem() {
     console.log('[EMAAlertSystem] searchStocks called, query:', query, 'exchange:', filter);
     setIsSearching(true);
     try {
-      const res = await axios.post('/api/search-symbols', { query, exchangeFilter: filter });
-      console.log('[EMAAlertSystem] search-symbols response:', res.data?.success, 'count:', res.data?.results?.length);
-      if (res.data.success) { setSearchResults(res.data.results); setShowSearch(true); }
-      else setSearchResults([]);
+      const q = query.trim();
+      if (filter === 'NSE' || filter === 'NFO' || filter === 'BSE') {
+        const res = await axios.post<{ success: boolean; results: SearchResult[] }>(`/api/search-symbols/${filter.toLowerCase()}`, { query: q });
+        if (res.data.success) { setSearchResults(res.data.results); setShowSearch(true); }
+        else setSearchResults([]);
+      } else {
+        const settled = await Promise.allSettled([
+          axios.post<{ success: boolean; results: SearchResult[] }>('/api/search-symbols/nse', { query: q }),
+          axios.post<{ success: boolean; results: SearchResult[] }>('/api/search-symbols/nfo', { query: q }),
+          axios.post<{ success: boolean; results: SearchResult[] }>('/api/search-symbols/bse', { query: q }),
+        ]);
+        const seen = new Set<string>();
+        const merged: SearchResult[] = [];
+        for (const s of settled) {
+          if (s.status !== 'fulfilled' || !s.value?.data?.success || !Array.isArray(s.value.data.results)) continue;
+          for (const r of s.value.data.results) {
+            const key = `${r.exchange || 'NSE'}:${r.symbol}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            merged.push(r);
+          }
+        }
+        setSearchResults(merged.slice(0, 30));
+        setShowSearch(true);
+      }
     } catch (err: any) {
       console.error('[EMAAlertSystem] search-symbols request failed:', err?.message, err?.response?.data);
       setSearchResults([]);
@@ -576,10 +597,10 @@ export default function EMAAlertSystem() {
     return s?.exchange || 'NSE';
   }, [symbols]);
 
-  const fetchPrice = useCallback(async (sym: string, tf: string, exchange?: string) => {
+  const fetchPrice = useCallback(async (sym: string, tf: string, exchange?: string, skipLoading?: boolean) => {
     if (!sym) return;
     const exch = exchange ?? getExchange(sym);
-    setIsFetchingPrice(true);
+    if (!skipLoading) setIsFetchingPrice(true);
     try {
       const res = await axios.post('/api/fetch-price', { symbol: sym, timeframe: tf, exchange: exch });
       if (res.data.success && res.data.data) {
@@ -608,7 +629,7 @@ export default function EMAAlertSystem() {
             : 'No price/EMA data available for this symbol and timeframe (contract may be expired or illiquid).';
         setPriceErrorByKey((prev) => ({ ...prev, [key]: msg }));
       }
-    } catch { /* ignore */ } finally { setIsFetchingPrice(false); }
+    } catch { /* ignore */ } finally { if (!skipLoading) setIsFetchingPrice(false); }
   }, []);
 
   const symbolKeys = symbols.map((s) => s.symbol).join(',');
@@ -625,10 +646,28 @@ export default function EMAAlertSystem() {
   useEffect(() => {
     if (!symbolKeys) return;
     if (lastFetchedRef.current === timeframeFetchKey) return;
-    lastFetchedRef.current = timeframeFetchKey;
     const list = symbolsRef.current;
     const tfBySym = timeframeBySymbolRef.current;
-    list.forEach((s) => fetchPrice(s.symbol, tfBySym[s.symbol] ?? DEFAULT_TIMEFRAME, s.exchange));
+    const previousKey = lastFetchedRef.current;
+    const previousMap: Record<string, string> = previousKey
+      ? Object.fromEntries(
+          previousKey.split(',').filter(Boolean).map((part) => {
+            const i = part.indexOf(':');
+            return [part.slice(0, i), part.slice(i + 1)];
+          })
+        )
+      : {};
+    const toFetch = list.filter((s) => {
+      const tf = tfBySym[s.symbol] ?? DEFAULT_TIMEFRAME;
+      const prev = previousMap[s.symbol];
+      return prev === undefined || prev !== tf;
+    });
+    lastFetchedRef.current = timeframeFetchKey;
+    if (toFetch.length === 0) return;
+    setIsFetchingPrice(true);
+    Promise.all(
+      toFetch.map((s) => fetchPrice(s.symbol, tfBySym[s.symbol] ?? DEFAULT_TIMEFRAME, s.exchange, true))
+    ).finally(() => setIsFetchingPrice(false));
   }, [timeframeFetchKey, symbolKeys, fetchPrice]);
 
   // ===================================

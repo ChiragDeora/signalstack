@@ -90,6 +90,22 @@ interface AngelSession {
   expiresAt: number;
 }
 
+/**
+ * Detect whether a query looks like an NFO trading symbol (or partial).
+ * NFO symbols contain a date pattern like 17MAR26 or 28DEC2347700CE.
+ * Human queries like "Nifty 50", "Bank Nifty", "Ni" do NOT match.
+ * searchScrip API only works for NFO with symbol-ish input; human names
+ * cause the server to return HTML errors (not auth failures).
+ */
+function looksLikeNfoSymbol(query: string): boolean {
+  const q = query.toUpperCase().trim();
+  // Contains date pattern: 2+ digits followed by 3-letter month followed by 2-4 digits
+  if (/\d{2}[A-Z]{3}\d{2,4}/.test(q)) return true;
+  // Ends with FUT, CE, PE (explicit derivative suffix)
+  if (/(?:FUT|CE|PE)$/.test(q)) return true;
+  return false;
+}
+
 export class AngelOneDataSource {
   private apiKey: string;
   private clientCode: string;
@@ -232,7 +248,13 @@ export class AngelOneDataSource {
     }
   }
 
-  /** Call searchScrip (single host: apiconnect.angelone.in per official SDK). */
+  /**
+   * Call searchScrip (single host: apiconnect.angelone.in per official SDK).
+   *
+   * FIX: Distinguishes real auth errors (HTTP 401/403) from HTML error pages
+   * that Angel returns for bad NFO queries. Only throws 'Auth' for genuine
+   * authentication failures; returns { status: false } for other HTML responses.
+   */
   private async searchScripApi(exchange: string, searchscrip: string): Promise<{ status: boolean; data?: Array<{ symboltoken: string; tradingsymbol: string }>; message?: string }> {
     const path = '/rest/secure/angelbroking/order/v1/searchScrip';
     const res = await fetch(`${ANGEL_BASE}${path}`, {
@@ -240,19 +262,29 @@ export class AngelOneDataSource {
       headers: this.getHeaders(true),
       body: JSON.stringify({ exchange, searchscrip }),
     });
+    // Genuine HTTP-level auth failures — throw so callers can re-auth
     if (res.status === 401 || res.status === 403) throw new Error('Auth');
     const raw = await res.text();
     if (typeof raw !== 'string' || raw.length === 0) {
       return { status: false, message: 'Empty response' };
     }
-    // Bug #1: Angel returns HTTP 200 with HTML "Access Denied" — treat as auth failure so we re-login
+    // FIX: HTML / "Access Denied" with HTTP 200 — distinguish auth vs bad-query.
+    // If we have a valid session (not expired), this is likely a bad query or
+    // server-side error, not an auth issue. Don't throw Auth; just return no data.
+    // This prevents the 3-round re-login spiral for NFO human-name queries.
     if (
       raw.startsWith('Access den') ||
       raw.includes('Access Denied') ||
       raw.startsWith('<') ||
       raw.startsWith('<!DOCTYPE')
     ) {
-      console.log('[angelOne.searchScrip] HTML/Access Denied - re-authenticating');
+      if (this.session && this.session.expiresAt > Date.now() + 60_000) {
+        // Session is fresh — this is NOT an auth failure, it's the API rejecting the query
+        console.log(`[angelOne.searchScrip] ${exchange}: HTML/error response for "${searchscrip}" — not an auth issue (session still valid), returning empty`);
+        return { status: false, message: `HTML error response for ${exchange} query` };
+      }
+      // Session may genuinely be expired — treat as auth
+      console.log('[angelOne.searchScrip] HTML/Access Denied with stale session - re-authenticating');
       throw new Error('Auth');
     }
     type SearchScripResponse = { status?: boolean; data?: Array<{ symboltoken?: string; tradingsymbol?: string }>; message?: string };
@@ -270,13 +302,18 @@ export class AngelOneDataSource {
     return json as { status: boolean; data?: Array<{ symboltoken: string; tradingsymbol: string }>; message?: string };
   }
 
-  /** Ensure scrip master is loaded (shared by resolve and search fallback). */
+  /**
+   * Ensure scrip master is loaded (shared by resolve and search fallback).
+   * FIX: Timeout increased from 30s to 60s — the JSON is ~50MB / 200k rows
+   * and regularly exceeds 30s on cold fetches, causing "operation was aborted"
+   * and 0 search results.
+   */
   private async ensureScripMaster(): Promise<ScripRow[]> {
     if (scripMasterCache && Date.now() - scripMasterFetchedAt <= SCRIP_MASTER_TTL_MS) {
       return scripMasterCache;
     }
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000);
+    const timeout = setTimeout(() => controller.abort(), 60_000); // FIX: 60s (was 30s)
     try {
       const res = await fetch(SCRIP_MASTER_URL, { signal: controller.signal });
       const raw = await res.text();
@@ -290,10 +327,35 @@ export class AngelOneDataSource {
     }
   }
 
+  /**
+   * Pre-load scrip master into cache. Call from warmup so the first user
+   * search doesn't pay the 20-60s cold-fetch cost.
+   */
+  async preloadScripMaster(): Promise<void> {
+    try {
+      await this.ensureScripMaster();
+    } catch (e: any) {
+      console.warn('[angelOne.preloadScripMaster] failed:', e?.message);
+    }
+  }
+
+  /** Normalize search query to NFO underlying prefix (e.g. "Nifty 50" -> "NIFTY", "BANK NIFTY" -> "BANKNIFTY"). */
+  private normalizeNfoUnderlying(q: string): string {
+    const u = q.replace(/\s+/g, '').toUpperCase();
+    if (u === 'NIFTY50' || u === 'NIFTY') return 'NIFTY';
+    if (u === 'BANKNIFTY' || u === 'NIFTYBANK') return 'BANKNIFTY';
+    const withSpace = q.toUpperCase().trim();
+    if (withSpace === 'NIFTY 50' || withSpace.startsWith('NIFTY 50')) return 'NIFTY';
+    if (withSpace.includes('BANK') && withSpace.includes('NIFTY')) return 'BANKNIFTY';
+    if (withSpace.startsWith('NIFTY')) return 'NIFTY';
+    return u;
+  }
+
   /** Search scrip master by query (when searchScrip API returns 401/403). Returns NSE, NFO (nearest expiry first), BSE. Optional exchangeFilter limits to one segment. */
   private async searchSymbolsFromScripMaster(query: string, exchangeFilter?: 'ALL' | 'NSE' | 'NFO' | 'BSE'): Promise<SearchResult[]> {
     const q = query.toUpperCase().trim();
     if (!q || q.length < 1) return [];
+    const nfoPrefix = this.normalizeNfoUnderlying(q);
     try {
       const rows = await this.ensureScripMaster();
       const nseResults: SearchResult[] = [];
@@ -304,6 +366,7 @@ export class AngelOneDataSource {
       todayStart.setHours(0, 0, 0, 0);
       const todayTs = todayStart.getTime();
       const match = (s: string, n: string) => (s && s.toUpperCase().includes(q)) || (n && n.toUpperCase().includes(q));
+      const matchNfo = (s: string, n: string) => match(s, n) || ((nfoPrefix === 'NIFTY' || nfoPrefix === 'BANKNIFTY') && s.startsWith(nfoPrefix));
       for (const r of rows) {
         const s = r.symbol || '';
         const n = r.name || '';
@@ -330,7 +393,7 @@ export class AngelOneDataSource {
             country: 'India',
             type: 'Index',
           });
-        } else if (seg === 'NFO' && match(s, n)) {
+        } else if (seg === 'NFO' && matchNfo(s, n)) {
           seen.add(key);
           const isFut = s.includes('FUT');
           const type = isFut ? 'Future' : (s.endsWith('CE') || s.endsWith('PE') ? 'Option' : 'Derivative');
@@ -739,32 +802,66 @@ export class AngelOneDataSource {
         ? [exchangeFilter]
         : ['NSE', 'NFO', 'BSE'];
 
+    // FIX: For NFO, searchScrip only works with trading-symbol-like input
+    // (e.g. "NIFTY17MAR26", "BANKNIFTY28DEC2347700CE"). Human queries like
+    // "Nifty 50", "Bank Nifty", "Ni" cause the server to return HTML errors.
+    // Skip the API call for NFO when the query is clearly a human name search
+    // and rely on the scrip master (which runs in parallel anyway).
+    const useSearchScripForNfo = looksLikeNfoSymbol(searchscrip);
+    if (!useSearchScripForNfo && exchangesToSearch.includes('NFO')) {
+      console.log(`[angelOne.searchSymbols] NFO: query "${searchscrip}" is a human name, skipping searchScrip → scrip master only`);
+    }
+
     const searchOne = async (exchange: string): Promise<{ status: boolean; data?: Array<{ symboltoken?: string; tradingsymbol?: string }> }> => {
+      // FIX: Skip searchScrip for NFO human-name queries — avoids the 3-round
+      // auth retry spiral and 30s+ wasted time per search
+      if (exchange === 'NFO' && !useSearchScripForNfo) {
+        return { status: false };
+      }
       try {
         return await this.searchScripApi(exchange, searchscrip);
       } catch (authErr: any) {
-        if (authErr?.message === 'Auth') {
-          await this.refreshToken();
-          try {
-            return await this.searchScripApi(exchange, searchscrip);
-          } catch (retryErr: any) {
-            if (retryErr?.message === 'Auth') {
-              console.log('[angelOne.searchSymbols]', exchange, 'still Auth after refresh, skipping');
+        if (authErr?.message !== 'Auth') return { status: false };
+        await this.refreshToken();
+        try {
+          return await this.searchScripApi(exchange, searchscrip);
+        } catch (retryErr: any) {
+          if (retryErr?.message === 'Auth') {
+            console.warn('[angelOne.searchSymbols]', exchange, 'Auth again after refresh — trying full login (per SmartAPI docs)');
+            // FIX: Don't null out this.session here — it creates a race condition
+            // with NSE/BSE searches running in parallel. Use a fresh login
+            // but don't invalidate the session that other callers may be using.
+            const loggedIn = await this.login();
+            if (loggedIn) {
+              try {
+                return await this.searchScripApi(exchange, searchscrip);
+              } catch {
+                return { status: false };
+              }
             }
-            return { status: false };
+            console.warn('[angelOne.searchSymbols]', exchange, 'still failing after full login, will use scrip master for this exchange');
           }
+          return { status: false };
         }
-        return { status: false };
       }
     };
 
+    // Run API and scrip master in parallel so we never skip an exchange and NFO is faster (use fallback when API fails/slow)
     try {
-      const resMap = await Promise.all(exchangesToSearch.map((ex) => searchOne(ex).then((r) => ({ ex, r }))));
+      const [resMap, fallbackAll] = await Promise.all([
+        Promise.all(exchangesToSearch.map((ex) => searchOne(ex).then((r) => ({ ex, r })))),
+        this.searchSymbolsFromScripMaster(searchscrip, exchangeFilter),
+      ]);
       const nseRes = exchangesToSearch.includes('NSE') ? resMap.find((x) => x.ex === 'NSE')?.r : { status: false };
       const nfoRes = exchangesToSearch.includes('NFO') ? resMap.find((x) => x.ex === 'NFO')?.r : { status: false };
       const bseRes = exchangesToSearch.includes('BSE') ? resMap.find((x) => x.ex === 'BSE')?.r : { status: false };
+      const fallbackByExchange = {
+        NSE: fallbackAll.filter((r) => r.exchange === 'NSE'),
+        NFO: fallbackAll.filter((r) => r.exchange === 'NFO'),
+        BSE: fallbackAll.filter((r) => r.exchange === 'BSE'),
+      };
 
-      // NSE: equity (-EQ) first, then indices/other
+      // NSE: equity (-EQ) first, then indices/other; if API failed, use scrip master so we never skip
       if (nseRes?.status && Array.isArray(nseRes.data)) {
         for (const r of nseRes.data) {
           if (!r.tradingsymbol) continue;
@@ -797,9 +894,16 @@ export class AngelOneDataSource {
             type: 'Index',
           });
         }
+      } else if (fallbackByExchange.NSE.length > 0) {
+        for (const r of fallbackByExchange.NSE) {
+          const key = `NSE:${r.symbol}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          results.push(r);
+        }
       }
 
-      // NFO: futures and options (BANK NIFTY, NIFTY, etc.)
+      // NFO: futures and options; if API failed, use scrip master so we never skip
       if (nfoRes?.status && Array.isArray(nfoRes.data)) {
         for (const r of nfoRes.data) {
           if (!r.tradingsymbol) continue;
@@ -822,9 +926,16 @@ export class AngelOneDataSource {
             type,
           });
         }
+      } else if (fallbackByExchange.NFO.length > 0) {
+        for (const r of fallbackByExchange.NFO) {
+          const key = `NFO:${r.symbol}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          results.push(r);
+        }
       }
 
-      // BSE: equity
+      // BSE: equity; if API failed, use scrip master so we never skip
       if (bseRes?.status && Array.isArray(bseRes.data)) {
         for (const r of bseRes.data) {
           if (!r.tradingsymbol) continue;
@@ -841,16 +952,16 @@ export class AngelOneDataSource {
             type: 'Equity',
           });
         }
+      } else if (fallbackByExchange.BSE.length > 0) {
+        for (const r of fallbackByExchange.BSE) {
+          const key = `BSE:${r.symbol}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          results.push(r);
+        }
       }
 
       let out = results.slice(0, 30);
-      if (out.length === 0) {
-        const fallback = await this.searchSymbolsFromScripMaster(searchscrip, exchangeFilter);
-        if (fallback.length > 0) {
-          console.log('[angelOne.searchSymbols] Using scrip master fallback:', fallback.length, 'results');
-          out = fallback;
-        }
-      }
       console.log('[angelOne.searchSymbols] Returning', out.length, 'results (NSE/NFO/BSE):', out.map((r) => `${r.exchange}:${r.symbol}`).slice(0, 8));
       return out;
     } catch (e: any) {
