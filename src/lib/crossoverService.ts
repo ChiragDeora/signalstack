@@ -65,6 +65,8 @@ export class CrossoverService {
   private pushSubscriptions: Map<string, PushSubscriptionData> = new Map();
   private onSubscriptionExpired?: OnSubscriptionExpired;
   private initialized = false;
+  /** Per-EMA-pair, per-candle de-duplication: key = userId|symbol|timeframe|fast|slow|type, value = last alert timestamp */
+  private lastAlertByPairAndCandle: Map<string, string> = new Map();
 
   constructor(io: any, options?: { onSubscriptionExpired?: OnSubscriptionExpired }) {
     this.io = io;
@@ -249,12 +251,30 @@ export class CrossoverService {
 
   /**
    * Handle detected crossover alerts. When userId is set, fetches that user's email from Clerk and sends the alert there too.
-   * Every genuine crossover triggers an immediate alert — the CrossoverDetector's lastRelation tracking prevents duplicates.
+   *
+   * Additional guard on top of the EMA engine:
+   * - Only send **one** alert per symbol + timeframe + EMA pair + direction **per candle timestamp**.
+   *   This means late data corrections or repeated polls for the same candle (including 1m candles) will not spam extra emails.
    */
   private handleAlerts(alerts: CrossoverAlert[], userId?: string, _exchange?: string): void {
     const userEmailPromise =
       userId && alerts.length > 0 ? getClerkUserEmail(userId) : Promise.resolve(null);
     for (const alert of alerts) {
+      const pairKey = [
+        userId ?? 'global',
+        alert.symbol.toUpperCase(),
+        alert.timeframe,
+        alert.fastPeriod,
+        alert.slowPeriod,
+        alert.crossoverType,
+      ].join('|');
+      const lastTs = this.lastAlertByPairAndCandle.get(pairKey);
+      // If we've already sent an alert for this exact candle timestamp for this EMA pair + direction, skip it
+      if (lastTs && lastTs === alert.timestamp) {
+        continue;
+      }
+      this.lastAlertByPairAndCandle.set(pairKey, alert.timestamp);
+
       addAlert(alert);
       this.io?.emit('alert:crossover', alert);
 

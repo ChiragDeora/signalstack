@@ -113,8 +113,9 @@ export default function EMAAlertSystem() {
   const [editPairSlow, setEditPairSlow] = useState<number>(21);
   const [showRefreshModal, setShowRefreshModal] = useState(true);
   const [refreshModalMinTimeElapsed, setRefreshModalMinTimeElapsed] = useState(false);
-  const [showSearchMobile, setShowSearchMobile] = useState(false); // collapsed on mobile by default
+  const [showSearchMobile, setShowSearchMobile] = useState(true); // search panel visible by default on mobile
   const [showEmaConfig, setShowEmaConfig] = useState(false); // collapsed on mobile by default
+  const [replacingSymbol, setReplacingSymbol] = useState<string | null>(null);
   const [testEmailStatus, setTestEmailStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle');
   const [testEmailMessage, setTestEmailMessage] = useState<string | null>(null);
   const [testPushStatus, setTestPushStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle');
@@ -483,7 +484,10 @@ export default function EMAAlertSystem() {
   }, [searchStocks, searchExchangeFilter]);
 
   const addSymbol = async (result: SearchResult) => {
-    if (symbols.some((s) => s.symbol.toUpperCase() === result.symbol.toUpperCase())) {
+    const toReplace = replacingSymbol;
+    const isReplace = toReplace != null;
+    const isDuplicate = symbols.some((s) => s.symbol.toUpperCase() === result.symbol.toUpperCase());
+    if (isDuplicate && !isReplace) {
       setShowSearch(false);
       setSearchQuery('');
       return;
@@ -494,7 +498,28 @@ export default function EMAAlertSystem() {
       currency: result.currency || 'INR',
       exchange: result.exchange || 'NSE',
     };
-    setSymbols((prev) => [...prev, newEntry]);
+    if (isReplace && toReplace) {
+      const sym = toReplace;
+      const tf = getTimeframe(sym);
+      if (monitoredSymbols.has(sym)) {
+        try {
+          await axios.delete('/api/monitor', { data: { symbol: sym, timeframe: tf } });
+        } catch { /* ignore */ }
+        setMonitoredSymbols((prev) => { const next = new Set(prev); next.delete(sym); return next; });
+      }
+      const key = watchKey(sym, tf);
+      setPriceByKey((prev) => { const next = { ...prev }; delete next[key]; return next; });
+      setEmaByKey((prev) => { const next = { ...prev }; delete next[key]; return next; });
+      setWarmupByKey((prev) => { const next = { ...prev }; delete next[key]; return next; });
+      setTimeframeBySymbol((prev) => { const next = { ...prev }; delete next[sym]; return next; });
+      setEmasBySymbol((prev) => { const next = { ...prev }; delete next[sym]; return next; });
+      setReplacingSymbol(null);
+    }
+    setSymbols((prev) =>
+      isReplace && toReplace
+        ? prev.filter((s) => s.symbol !== toReplace).concat([newEntry])
+        : [...prev, newEntry]
+    );
     setTimeframeBySymbol((prev) => ({ ...prev, [result.symbol]: DEFAULT_TIMEFRAME }));
     setEmasBySymbol((prev) => ({
       ...prev,
@@ -502,8 +527,8 @@ export default function EMAAlertSystem() {
     }));
     setSearchQuery('');
     setShowSearch(false);
+    setShowSearchMobile(false);
     setSelectedSymbol(result.symbol);
-    // Price for all symbols (including this one) is fetched by the effect when symbolKeys/timeframes change
   };
 
   const removeSymbol = async (sym: string) => {
@@ -686,23 +711,29 @@ export default function EMAAlertSystem() {
     }
   };
 
-  /** Stop all monitoring (e.g. after bullish/bearish change). Only Add symbol does not stop. */
+  /**
+   * Stop monitoring only for the currently selected symbol when alert-mode
+   * switches (Bullish/Bearish). Other symbols keep running with their
+   * existing server-side settings until changed individually.
+   */
   const stopAllMonitoringFromConfigChange = useCallback(() => {
-    if (monitoredSymbols.size === 0) return;
-    const toStop = new Set(monitoredSymbols);
-    toStop.forEach((sym) => {
-      const tf = getTimeframe(sym);
-      axios.delete('/api/monitor', { data: { symbol: sym, timeframe: tf } }).catch(() => { });
-      const key = watchKey(sym, tf);
-      setPriceByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
-      setEmaByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
-      setWarmupByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
+    if (!displaySymbol || !monitoredSymbols.has(displaySymbol)) return;
+    const sym = displaySymbol;
+    const tf = getTimeframe(sym);
+    axios.delete('/api/monitor', { data: { symbol: sym, timeframe: tf } }).catch(() => { });
+    const key = watchKey(sym, tf);
+    setPriceByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
+    setEmaByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
+    setWarmupByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
+    setMonitoredSymbols((prev) => {
+      const next = new Set(prev);
+      next.delete(sym);
+      return next;
     });
-    setMonitoredSymbols(new Set());
     if (userId) refetchWatches();
-    setMonitorStatus('Monitoring stopped — start again to apply alert settings');
+    setMonitorStatus('Monitoring stopped for this symbol — start again to apply alert settings');
     setTimeout(() => setMonitorStatus(''), 4000);
-  }, [monitoredSymbols, getTimeframe, userId]);
+  }, [displaySymbol, monitoredSymbols, getTimeframe, userId]);
 
   const _startMonitoring = async () => {
     if (restoringWatches) {
@@ -1041,57 +1072,72 @@ export default function EMAAlertSystem() {
             )}
             {mounted && 'serviceWorker' in navigator && (
               pushAvailable === false ? (
-                <span className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-amber-600/30 text-amber-700 flex-shrink-0" title="Add VAPID env vars in production to enable alerts">
+                <span
+                  className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-amber-600/30 text-amber-700 flex-shrink-0"
+                  title="Add VAPID env vars in production to enable alerts"
+                >
                   Alerts unavailable
                 </span>
               ) : (
-                <div className="flex items-center gap-2 flex-wrap">
-                  {!pushEnabled ? (
-                    <button
-                      onClick={enablePush}
-                      className="tf-btn flex items-center gap-1.5 !text-xs flex-shrink-0"
-                      title="Get crossover alerts on this device (browser notifications + email)"
-                      aria-label="Enable crossover alerts on this device"
-                    >
-                      <Bell className="w-3.5 h-3.5" />
-                      <span>Enable alerts</span>
-                    </button>
-                  ) : (
+                <div className="flex items-center gap-3 flex-wrap">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[10px] sm:text-xs font-medium uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>
+                      Alerts
+                    </span>
                     <button
                       type="button"
-                      onClick={disablePush}
-                      className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-green-600/30 text-green-700 flex items-center gap-1.5 flex-shrink-0 hover:bg-green-50 transition-colors cursor-pointer"
-                      title="Click to turn alerts off"
-                      aria-label="Alerts on – click to turn off"
+                      onClick={pushEnabled ? disablePush : enablePush}
+                      role="switch"
+                      aria-checked={pushEnabled}
+                      className="relative inline-flex items-center h-5 w-9 rounded-full border transition-colors duration-150"
+                      style={{
+                        borderColor: pushEnabled ? 'rgba(22,163,74,0.6)' : 'rgba(148,163,184,0.8)',
+                        background: pushEnabled ? 'var(--green-bg)' : 'rgba(148,163,184,0.12)',
+                      }}
+                      title={pushEnabled ? 'Turn alerts off for this device' : 'Enable browser + email crossover alerts on this device'}
+                      aria-label={pushEnabled ? 'Alerts on – click to turn off' : 'Alerts off – click to turn on'}
                     >
-                      <Bell className="w-3.5 h-3.5" />
-                      Alerts on
+                      <span
+                        className={`inline-flex items-center justify-center w-4 h-4 rounded-full bg-white shadow-sm transform transition-transform duration-150 ${
+                          pushEnabled ? 'translate-x-4' : 'translate-x-0'
+                        }`}
+                      >
+                        <Bell className="w-3 h-3" style={{ color: pushEnabled ? 'var(--green)' : 'var(--text-muted)' }} />
+                      </span>
                     </button>
-                  )}
-                  <button
-                    onClick={() => sendTestPush(0)}
-                    disabled={testPushStatus === 'sending'}
-                    className="tf-btn flex items-center gap-1.5 !text-xs disabled:opacity-60 disabled:cursor-not-allowed flex-shrink-0"
-                    title="Send a test push now (shows in this tab too)"
-                    aria-label="Send test push notification"
-                  >
-                    <Bell className="w-3.5 h-3.5" />
-                    <span>
-                      {testPushStatus === 'sending' ? 'Sending…' : testPushStatus === 'success' ? 'Sent!' : testPushStatus === 'error' ? 'Failed' : 'Test notification'}
-                    </span>
-                  </button>
-                  <button
-                    onClick={() => sendTestPush(60)}
-                    disabled={testPushStatus === 'sending'}
-                    className="tf-btn flex items-center gap-1.5 !text-xs disabled:opacity-60 disabled:cursor-not-allowed flex-shrink-0"
-                    title="Send test in 1 min—close the browser to verify push when away"
-                    aria-label="Test notification when browser closed"
-                  >
-                    <Bell className="w-3.5 h-3.5" />
-                    <span>Test when closed</span>
-                  </button>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <button
+                      onClick={() => sendTestPush(0)}
+                      disabled={testPushStatus === 'sending'}
+                      className="px-2.5 py-1.5 rounded-full border text-[10px] sm:text-xs font-medium flex items-center gap-1 disabled:opacity-60 disabled:cursor-not-allowed flex-shrink-0"
+                      style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
+                      title="Send a test push now (shows in this tab too)"
+                      aria-label="Send test push notification"
+                    >
+                      <Bell className="w-3 h-3" />
+                      <span>Test now</span>
+                    </button>
+                    <button
+                      onClick={() => sendTestPush(60)}
+                      disabled={testPushStatus === 'sending'}
+                      className="px-2.5 py-1.5 rounded-full border text-[10px] sm:text-xs font-medium flex items-center gap-1 disabled:opacity-60 disabled:cursor-not-allowed flex-shrink-0"
+                      style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
+                      title="Send a test in 1 minute (good to verify when the browser is closed)"
+                      aria-label="Send delayed test push notification"
+                    >
+                      <Bell className="w-3 h-3" />
+                      <span>Test later</span>
+                    </button>
+                  </div>
+
                   {testPushMessage && (
-                    <span className="text-[10px] max-w-[220px] truncate" style={{ color: 'var(--text-muted)' }} title={testPushMessage}>
+                    <span
+                      className="text-[10px] max-w-[220px] truncate"
+                      style={{ color: 'var(--text-muted)' }}
+                      title={testPushMessage}
+                    >
                       {testPushMessage}
                     </span>
                   )}
@@ -1128,8 +1174,10 @@ export default function EMAAlertSystem() {
           </div>
         )}
 
-        {/* ─── SEARCH BAR + EXCHANGE FILTER (collapsible on mobile) ─── */}
-        <div className={`${showSearchMobile ? '' : 'hidden sm:block'} mb-3 sm:mb-4`}>
+        {/* ─── SEARCH BAR + EXCHANGE FILTER (mobile can be collapsed; always visible on desktop) ─── */}
+        <div
+          className={`mb-3 sm:mb-4 ${showSearchMobile ? 'block' : 'hidden sm:block'} ${showSearch && searchResults.length > 0 ? 'relative z-[100]' : ''}`}
+        >
           <div className="card !p-3 sm:!p-4" ref={searchContainerRef}>
             <div className="flex flex-col sm:flex-row gap-2 sm:gap-2 sm:items-center">
               <div className="relative min-w-0 w-full sm:w-[75%]">
@@ -1140,12 +1188,24 @@ export default function EMAAlertSystem() {
                   onChange={(e) => { setSearchQuery(e.target.value); debouncedSearch(e.target.value); }}
                   onFocus={() => { if (searchResults.length > 0) setShowSearch(true); }}
                   onBlur={() => { setTimeout(() => setShowSearch(false), 180); }}
-                  className="input-field !py-2.5 sm:!py-3 text-sm sm:text-base font-semibold pr-10 w-full"
+                  className={`input-field !py-2.5 sm:!py-3 text-sm sm:text-base font-semibold w-full ${searchQuery.trim().length > 0 ? 'pr-9' : 'pr-10'}`}
                   placeholder="Search symbols (e.g. RELIANCE)"
                   aria-autocomplete="list"
                   aria-controls={showSearch && searchResults.length > 0 ? 'search-results-listbox' : undefined}
                 />
-                <Search className={`absolute right-3 sm:right-4 top-1/2 -translate-y-1/2 w-4 h-4 sm:w-5 sm:h-5 pointer-events-none ${isSearching ? 'animate-spin' : ''}`} style={{ color: 'var(--text-muted)' }} />
+                {searchQuery.trim().length > 0 ? (
+                  <button
+                    type="button"
+                    onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); setSearchQuery(''); setShowSearch(false); setSearchResults([]); searchInputRef.current?.focus(); }}
+                    className="absolute right-2.5 sm:right-3 top-1/2 -translate-y-1/2 p-1.5 rounded-full hover:bg-black/5 z-10"
+                    style={{ color: 'var(--text-muted)' }}
+                    aria-label="Clear search"
+                  >
+                    <X className="w-4 h-4 sm:w-5 sm:h-5" />
+                  </button>
+                ) : (
+                  <Search className={`absolute right-3 sm:right-4 top-1/2 -translate-y-1/2 w-4 h-4 sm:w-5 sm:h-5 pointer-events-none ${isSearching ? 'animate-spin' : ''}`} style={{ color: 'var(--text-muted)' }} />
+                )}
               </div>
               <div className="flex flex-row items-center gap-2 w-full sm:w-[25%] min-w-0">
                 <label htmlFor="search-exchange-filter" className="text-[10px] sm:text-xs font-medium uppercase tracking-wide flex-shrink-0 whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
@@ -1165,11 +1225,11 @@ export default function EMAAlertSystem() {
                   <option value="NFO">NFO</option>
                   <option value="BSE">BSE</option>
                 </select>
-                {/* Close search on mobile */}
+                {/* Close search / collapse search panel on mobile */}
                 <button
                   type="button"
-                  onClick={() => setShowSearchMobile(false)}
-                  className="sm:hidden p-2 rounded-lg flex-shrink-0"
+                  onMouseDown={(e) => { e.preventDefault(); setShowSearch(false); setShowSearchMobile(false); setSearchQuery(''); setSearchResults([]); }}
+                  className="sm:hidden p-2 rounded-lg flex-shrink-0 touch-manipulation"
                   style={{ color: 'var(--text-muted)' }}
                   aria-label="Close search"
                 >
@@ -1178,8 +1238,8 @@ export default function EMAAlertSystem() {
               </div>
             </div>
             <div className="relative">
-              {((showSearch && searchResults.length > 0) || searchQuery.trim().length > 0) && (
-                <div id="search-results-listbox" className="absolute top-full left-0 right-0 mt-2 search-drop max-h-64 overflow-y-auto z-50 rounded-xl shadow-xl" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }} role="listbox">
+              {showSearch && searchResults.length > 0 && (
+                <div id="search-results-listbox" className="absolute top-full left-0 right-0 mt-2 search-drop max-h-64 overflow-y-auto z-[110] rounded-xl shadow-xl" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-subtle)' }} role="listbox">
                   {searchResults.length > 0 ? (
                     searchResults.map((r, i) => (
                       <button
@@ -1274,22 +1334,40 @@ export default function EMAAlertSystem() {
             <div className="flex items-center justify-end gap-2">
               <button
                 type="button"
-                onClick={() => { setShowSearchMobile(true); setShowSearch(true); queueMicrotask(() => searchInputRef.current?.focus()); }}
+                onClick={() => { setShowSearch(true); setShowSearchMobile(true); setReplacingSymbol(null); queueMicrotask(() => searchInputRef.current?.focus()); }}
                 className="px-3 py-2 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5"
                 style={{ borderColor: 'var(--border-subtle)', color: 'var(--accent)' }}
               >
                 <Plus className="w-4 h-4" />
                 <span>New</span>
               </button>
-              <button
-                type="button"
-                onClick={handleReset}
-                className="px-3 py-2 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5"
-                style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-muted)' }}
-              >
-                <RefreshCw className="w-4 h-4" />
-                <span>Reset</span>
-              </button>
+              {symbols.length > 0 && displaySymbol && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowSearch(true);
+                      setShowSearchMobile(true);
+                      setReplacingSymbol(displaySymbol);
+                      queueMicrotask(() => searchInputRef.current?.focus());
+                    }}
+                    className="px-3 py-2 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5"
+                    style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
+                  >
+                    <Search className="w-4 h-4" />
+                    <span>Replace</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => displaySymbol && removeSymbol(displaySymbol)}
+                    className="px-3 py-2 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5"
+                    style={{ borderColor: 'rgba(220,38,38,0.4)', color: 'var(--red)' }}
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    <span>Delete</span>
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>
