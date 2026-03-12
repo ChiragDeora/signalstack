@@ -124,18 +124,14 @@ export class CrossoverService {
       if (priceData?.candleData && priceData.candleData.length > 0) {
         this.engine.warmUp(config.symbol, config.timeframe, priceData.candleData, config.userId);
 
-        // Silent seed tick: feed current LTP so lastRelation matches live data
-        // and the first real poll doesn't produce a false crossover.
-        if (priceData.price > 0) {
-          this.engine.processTick(
-            config.symbol, config.timeframe, priceData.price,
-            priceData.currency, priceData.source, config.userId,
-          ); // discard returned alerts — they are warmup artefacts
-        }
+      // NOTE: We no longer feed the live LTP as a "seed tick" here.
+      // The warmup already initialises lastRelation on the crossover
+      // detectors using closed-candle EMA values, and processNewCandles
+      // will pick up the next closed candle on the first poll.
 
-        // Emit initial price and EMA data
-        this.emitPriceUpdate(config.symbol, config.timeframe, priceData);
-        this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
+      // Emit initial price and EMA data
+      this.emitPriceUpdate(config.symbol, config.timeframe, priceData);
+      this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
       } else {
         console.warn(`⚠️  No historical data for warmup of ${config.symbol}`);
         this.emitStatus(config.symbol, config.timeframe, 'running', 'Running without historical warmup — EMAs will initialize from live ticks');
@@ -218,31 +214,38 @@ export class CrossoverService {
   }
 
   /**
-   * Poll price data and process through EMA engine
+   * Poll price data and process through EMA engine.
+   *
+   * FIX: Only update EMAs with confirmed candle closes (not live LTP).
+   * Previously, every poll fed the live LTP into the EMA as if it were a
+   * new candle close.  For a 5m timeframe polled every 30s, this meant the
+   * EMA received ~10 data points per candle instead of 1, producing values
+   * that diverged from the chart and triggering false crossover alerts.
    */
   private async pollAndProcess(config: WatchConfig): Promise<void> {
     try {
       const priceData = await this.dataSource.fetchTimeframeData(config.symbol, config.timeframe, (config.exchange as 'NSE' | 'NFO' | 'BSE') || 'NSE');
       if (!priceData) return;
 
-      // Emit price update
+      // Emit price update for UI display
       this.emitPriceUpdate(config.symbol, config.timeframe, priceData);
 
-      // Process through EMA engine (pass price timestamp so alert time = crossover time, not send time)
-      const alerts = this.engine.processTick(
+      // Process only newly-closed candles through the EMA engine.
+      // The live LTP is passed for display only — it is NOT fed into the EMAs.
+      const alerts = this.engine.processNewCandles(
         config.symbol,
         config.timeframe,
+        priceData.candleData || [],
         priceData.price,
         priceData.currency,
         priceData.source,
         config.userId,
-        priceData.timestamp,
       );
 
       // Emit EMA update
       this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
 
-      // Handle crossover alerts (pass userId and exchange so we skip email/push when market closed)
+      // Handle crossover alerts
       this.handleAlerts(alerts, config.userId, config.exchange);
     } catch (error) {
       console.error(`❌ Poll error for ${config.symbol}:`, error);

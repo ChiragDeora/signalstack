@@ -8,12 +8,28 @@ import { EMACalculator, CrossoverDetector } from './ema';
 import { CandleData, CrossoverAlert, WatchConfig, EmaStatus } from './types';
 import { randomUUID } from 'crypto';
 
+/** Convert timeframe string to duration in milliseconds */
+function timeframeToMs(timeframe: string): number {
+  const map: Record<string, number> = {
+    '1m': 60_000,
+    '5m': 5 * 60_000,
+    '15m': 15 * 60_000,
+    '30m': 30 * 60_000,
+    '1h': 60 * 60_000,
+    '4h': 4 * 60 * 60_000,
+    '1d': 24 * 60 * 60_000,
+  };
+  return map[timeframe] || 5 * 60_000;
+}
+
 interface SymbolState {
   config: WatchConfig;
   emas: Map<number, EMACalculator>;
   detectors: CrossoverDetector[];
   lastPrice: number | null;
   isWarmedUp: boolean;
+  /** Timestamp (ms) of the last candle whose close was fed into the EMAs */
+  lastProcessedCandleTs: number;
 }
 
 export class EMAEngine {
@@ -59,6 +75,7 @@ export class EMAEngine {
       detectors,
       lastPrice: null,
       isWarmedUp: false,
+      lastProcessedCandleTs: 0,
     });
 
     console.log(
@@ -97,12 +114,20 @@ export class EMAEngine {
 
     // Sort candles chronologically
     const sorted = [...candles].sort((a, b) => a.timestamp - b.timestamp);
-    const closePrices = sorted.map((c) => c.close).filter((p) => p > 0);
 
-    if (closePrices.length === 0) {
-      console.warn(`⚠️  EMA Engine: no valid close prices for warmup of ${symbol}`);
+    // Exclude the current (still-forming) candle: a candle is "closed" when
+    // its open-time + interval duration <= now.  This ensures we only warm up
+    // with confirmed close prices, matching what a chart would show.
+    const intervalMs = timeframeToMs(timeframe);
+    const now = Date.now();
+    const closedCandles = sorted.filter((c) => c.timestamp + intervalMs <= now && c.close > 0);
+
+    if (closedCandles.length === 0) {
+      console.warn(`⚠️  EMA Engine: no closed candles for warmup of ${symbol}`);
       return;
     }
+
+    const closePrices = closedCandles.map((c) => c.close);
 
     // Feed all historical closes to each EMA calculator
     for (const [period, calc] of state.emas) {
@@ -129,10 +154,11 @@ export class EMAEngine {
 
     state.lastPrice = closePrices[closePrices.length - 1];
     state.isWarmedUp = state.emas.size > 0;
+    state.lastProcessedCandleTs = closedCandles[closedCandles.length - 1].timestamp;
 
     const allReady = [...state.emas.values()].every((c) => c.isReady());
     console.log(
-      `📊 EMA Engine: warmup complete for ${symbol} (${timeframe}) — ${closePrices.length} candles, all EMAs ready: ${allReady}`
+      `📊 EMA Engine: warmup complete for ${symbol} (${timeframe}) — ${closePrices.length} closed candles, all EMAs ready: ${allReady}`
     );
   }
 
@@ -194,6 +220,99 @@ export class EMAEngine {
     }
 
     state.lastPrice = price;
+    return alerts;
+  }
+
+  /**
+   * Process only newly-closed candles through the EMA engine.
+   *
+   * Unlike processTick (which treats every call as a new data point), this
+   * method compares candle timestamps against the last processed candle and
+   * only feeds candles whose close is confirmed (candle start + interval <=
+   * now).  This produces EMA values identical to a chart — no intra-candle
+   * noise, no duplicate updates from repeated polling.
+   *
+   * @param currentPrice  Live LTP — stored for display only, NOT fed into EMAs.
+   */
+  processNewCandles(
+    symbol: string,
+    timeframe: string,
+    candles: CandleData[],
+    currentPrice: number,
+    currency: string,
+    source: string = 'candle-close',
+    userId?: string,
+  ): CrossoverAlert[] {
+    const key = this.makeKey(symbol, timeframe, userId);
+    const state = this.symbols.get(key);
+    if (!state) return [];
+
+    const intervalMs = timeframeToMs(timeframe);
+    const now = Date.now();
+
+    // Sort candles chronologically
+    const sorted = [...candles].sort((a, b) => a.timestamp - b.timestamp);
+
+    // Only process candles that are:
+    //  1. Newer than the last candle we already processed
+    //  2. Definitely closed (open-time + interval <= now)
+    //  3. Have a valid close price
+    const newClosedCandles = sorted.filter(
+      (c) =>
+        c.timestamp > state.lastProcessedCandleTs &&
+        c.timestamp + intervalMs <= now &&
+        c.close > 0,
+    );
+
+    if (newClosedCandles.length > 0) {
+      console.log(
+        `📊 EMA Engine: processing ${newClosedCandles.length} new closed candle(s) for ${symbol} (${timeframe})`,
+      );
+    }
+
+    const alerts: CrossoverAlert[] = [];
+
+    for (const candle of newClosedCandles) {
+      // Update all EMAs with the candle's confirmed close price
+      for (const [, calc] of state.emas) {
+        calc.update(candle.close);
+      }
+
+      // Check all crossover detectors
+      for (const detector of state.detectors) {
+        const ema1Val = state.emas.get(detector.ema1Period)?.getValue();
+        const ema2Val = state.emas.get(detector.ema2Period)?.getValue();
+
+        if (ema1Val !== null && ema1Val !== undefined && ema2Val !== null && ema2Val !== undefined) {
+          const result = detector.checkCrossover(ema1Val, ema2Val, candle.close, symbol);
+          if (result) {
+            const alert: CrossoverAlert = {
+              id: randomUUID(),
+              symbol,
+              timeframe,
+              fastPeriod: result.ema1Period,
+              slowPeriod: result.ema2Period,
+              fastEmaValue: parseFloat(result.ema1Value.toFixed(2)),
+              slowEmaValue: parseFloat(result.ema2Value.toFixed(2)),
+              crossoverType: result.type,
+              price: parseFloat(candle.close.toFixed(2)),
+              currency,
+              timestamp: new Date(candle.timestamp).toISOString(),
+              source,
+            };
+            alerts.push(alert);
+            console.log(
+              `🚨 CROSSOVER: ${alert.crossoverType.toUpperCase()} on ${symbol} — EMA(${alert.fastPeriod}) ${alert.crossoverType === 'bullish' ? '↑ above' : '↓ below'} EMA(${alert.slowPeriod}) at ₹${alert.price}`,
+            );
+          }
+        }
+      }
+
+      state.lastProcessedCandleTs = candle.timestamp;
+    }
+
+    // Update lastPrice with live LTP for display — but do NOT feed it into EMAs
+    state.lastPrice = currentPrice;
     return alerts;
   }
 
