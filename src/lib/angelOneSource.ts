@@ -106,6 +106,11 @@ function looksLikeNfoSymbol(query: string): boolean {
   return false;
 }
 
+/** Helper: sleep for ms. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 export class AngelOneDataSource {
   private apiKey: string;
   private clientCode: string;
@@ -583,55 +588,78 @@ export class AngelOneDataSource {
     const fromDate = new Date(toDate.getTime() - maxDays * 24 * 60 * 60 * 1000);
     const fromStr = fromDate.toISOString().slice(0, 16).replace('T', ' ');
     const toStr = toDate.toISOString().slice(0, 16).replace('T', ' ');
-    try {
-      const res = await fetch(`${ANGEL_BASE}/rest/secure/angelbroking/historical/v1/getCandleData`, {
-        method: 'POST',
-        headers: this.getHeaders(true),
-        body: JSON.stringify({
-          exchange,
-          symboltoken: resolved.symboltoken,
-          interval,
-          fromdate: fromStr,
-          todate: toStr,
-        }),
-      });
-      if (res.status === 401 || res.status === 403) {
-        if (!retried) {
-          await this.refreshToken();
-          return this.fetchHistoricalCandles(symbol, timeframe, candleCount, exchange, true);
+
+    // Retry loop with exponential backoff for "Too many requests" rate limiting
+    const MAX_RATE_LIMIT_RETRIES = 3;
+    for (let attempt = 0; attempt <= MAX_RATE_LIMIT_RETRIES; attempt++) {
+      try {
+        const res = await fetch(`${ANGEL_BASE}/rest/secure/angelbroking/historical/v1/getCandleData`, {
+          method: 'POST',
+          headers: this.getHeaders(true),
+          body: JSON.stringify({
+            exchange,
+            symboltoken: resolved.symboltoken,
+            interval,
+            fromdate: fromStr,
+            todate: toStr,
+          }),
+        });
+        if (res.status === 401 || res.status === 403) {
+          if (!retried) {
+            await this.refreshToken();
+            return this.fetchHistoricalCandles(symbol, timeframe, candleCount, exchange, true);
+          }
+          this.session = null;
+          return [];
         }
-        this.session = null;
-        return [];
-      }
-      const raw = await res.text();
-      if (raw.startsWith('Access den') || raw.startsWith('<') || raw.includes('Access Denied')) {
-        if (!retried) {
-          await this.refreshToken();
-          return this.fetchHistoricalCandles(symbol, timeframe, candleCount, exchange, true);
+        if (res.status === 429) {
+          if (attempt < MAX_RATE_LIMIT_RETRIES) {
+            const delay = (attempt + 1) * 2000; // 2s, 4s, 6s
+            console.warn(`⚠️  Angel getCandleData rate limited (HTTP 429) for ${symbol} — retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RATE_LIMIT_RETRIES})`);
+            await sleep(delay);
+            continue;
+          }
+          console.warn(`❌ Angel getCandleData rate limited for ${symbol} — exhausted ${MAX_RATE_LIMIT_RETRIES} retries`);
+          return [];
         }
-        console.warn(`⚠️  Angel getCandleData still Access Denied after retry (${exchange}) — invalidating session`);
-        this.session = null;
+        const raw = await res.text();
+        if (raw.startsWith('Access den') || raw.startsWith('<') || raw.includes('Access Denied')) {
+          if (!retried) {
+            await this.refreshToken();
+            return this.fetchHistoricalCandles(symbol, timeframe, candleCount, exchange, true);
+          }
+          console.warn(`⚠️  Angel getCandleData still Access Denied after retry (${exchange}) — invalidating session`);
+          this.session = null;
+          return [];
+        }
+        const json = JSON.parse(raw) as { status: boolean; data?: Array<string | number>[]; message?: string };
+        if (!json.status || !Array.isArray(json.data)) {
+          // Check for "Too many requests" in the JSON message body (Angel returns HTTP 200 + status=false)
+          if (json.message && /too many requests/i.test(json.message) && attempt < MAX_RATE_LIMIT_RETRIES) {
+            const delay = (attempt + 1) * 2000;
+            console.warn(`⚠️  Angel getCandleData: "${json.message}" for ${symbol} — retrying in ${delay}ms (attempt ${attempt + 1}/${MAX_RATE_LIMIT_RETRIES})`);
+            await sleep(delay);
+            continue;
+          }
+          console.warn(`❌ Angel One returned no data for ${symbol} (${exchange}) — status=${json.status} message=${json.message ?? 'none'} dataLength=${json.data?.length ?? 'null'}`);
+          return [];
+        }
+        const candles: CandleData[] = json.data
+          .map((row) => {
+            const [ts, open, high, low, close, vol] = row as [string, number, number, number, number, number];
+            const timestamp = typeof ts === 'string' ? new Date(ts).getTime() : (ts as number) * 1000;
+            return { timestamp, open: Number(open), high: Number(high), low: Number(low), close: Number(close), volume: Number(vol) || 0 };
+          })
+          .filter((c) => c.close > 0)
+          .sort((a, b) => a.timestamp - b.timestamp)
+          .slice(-candleCount);
+        return candles;
+      } catch (e: any) {
+        console.error('Angel getCandleData error:', e?.message);
         return [];
       }
-      const json = JSON.parse(raw) as { status: boolean; data?: Array<string | number>[]; message?: string };
-      if (!json.status || !Array.isArray(json.data)) {
-        console.warn(`❌ Angel One returned no data for ${symbol} (${exchange}) — status=${json.status} message=${json.message ?? 'none'} dataLength=${json.data?.length ?? 'null'}`);
-        return [];
-      }
-      const candles: CandleData[] = json.data
-        .map((row) => {
-          const [ts, open, high, low, close, vol] = row as [string, number, number, number, number, number];
-          const timestamp = typeof ts === 'string' ? new Date(ts).getTime() : (ts as number) * 1000;
-          return { timestamp, open: Number(open), high: Number(high), low: Number(low), close: Number(close), volume: Number(vol) || 0 };
-        })
-        .filter((c) => c.close > 0)
-        .sort((a, b) => a.timestamp - b.timestamp)
-        .slice(-candleCount);
-      return candles;
-    } catch (e: any) {
-      console.error('Angel getCandleData error:', e?.message);
-      return [];
     }
+    return [];
   }
 
   /** Fetch live Last Traded Price from Angel One (same as chart). */
@@ -639,49 +667,73 @@ export class AngelOneDataSource {
     if (!(await this.ensureSession())) return null;
     const resolved = await this.resolveSymbolForExchange(symbol, exchange);
     if (!resolved) return null;
-    try {
-      const res = await fetch(`${ANGEL_BASE}/rest/secure/angelbroking/order/v1/getLtpData`, {
-        method: 'POST',
-        headers: this.getHeaders(true),
-        body: JSON.stringify({
-          exchange,
-          tradingsymbol: resolved.tradingsymbol,
-          symboltoken: resolved.symboltoken,
-        }),
-      });
-      if (res.status === 401 || res.status === 403) {
-        if (!retried) {
-          await this.refreshToken();
-          return this.fetchLTP(symbol, exchange, true);
+
+    const MAX_RATE_LIMIT_RETRIES = 3;
+    for (let attempt = 0; attempt <= MAX_RATE_LIMIT_RETRIES; attempt++) {
+      try {
+        const res = await fetch(`${ANGEL_BASE}/rest/secure/angelbroking/order/v1/getLtpData`, {
+          method: 'POST',
+          headers: this.getHeaders(true),
+          body: JSON.stringify({
+            exchange,
+            tradingsymbol: resolved.tradingsymbol,
+            symboltoken: resolved.symboltoken,
+          }),
+        });
+        if (res.status === 401 || res.status === 403) {
+          if (!retried) {
+            await this.refreshToken();
+            return this.fetchLTP(symbol, exchange, true);
+          }
+          this.session = null;
+          return null;
         }
-        this.session = null;
+        if (res.status === 429) {
+          if (attempt < MAX_RATE_LIMIT_RETRIES) {
+            const delay = (attempt + 1) * 1500;
+            console.warn(`⚠️  Angel getLtpData rate limited (HTTP 429) for ${symbol} — retrying in ${delay}ms`);
+            await sleep(delay);
+            continue;
+          }
+          return null;
+        }
+        const raw = await res.text();
+        if (raw.startsWith('Access den') || raw.startsWith('<') || raw.includes('Access Denied')) {
+          if (!retried) {
+            await this.refreshToken();
+            return this.fetchLTP(symbol, exchange, true);
+          }
+          console.warn(`⚠️  Angel getLtpData still Access Denied after retry (${exchange}) — invalidating session`);
+          this.session = null;
+          return null;
+        }
+        const json = JSON.parse(raw) as {
+          status: boolean;
+          data?: { ltp: string; open?: string; high?: string; low?: string; close?: string };
+          message?: string;
+        };
+        if (!json.status || !json.data?.ltp) {
+          // "Too many requests" returned as HTTP 200 + status=false
+          if (json.message && /too many requests/i.test(json.message) && attempt < MAX_RATE_LIMIT_RETRIES) {
+            const delay = (attempt + 1) * 1500;
+            console.warn(`⚠️  Angel getLtpData: "${json.message}" for ${symbol} — retrying in ${delay}ms`);
+            await sleep(delay);
+            continue;
+          }
+          return null;
+        }
+        const ltp = parseFloat(String(json.data.ltp));
+        const open = parseFloat(String(json.data.open ?? 0)) || ltp;
+        const high = parseFloat(String(json.data.high ?? 0)) || ltp;
+        const low = parseFloat(String(json.data.low ?? 0)) || ltp;
+        const close = parseFloat(String(json.data.close ?? 0)) || ltp;
+        return { ltp, open, high, low, close };
+      } catch (e: any) {
+        console.error('Angel getLtpData error:', e?.message);
         return null;
       }
-      const raw = await res.text();
-      if (raw.startsWith('Access den') || raw.startsWith('<') || raw.includes('Access Denied')) {
-        if (!retried) {
-          await this.refreshToken();
-          return this.fetchLTP(symbol, exchange, true);
-        }
-        console.warn(`⚠️  Angel getLtpData still Access Denied after retry (${exchange}) — invalidating session`);
-        this.session = null;
-        return null;
-      }
-      const json = JSON.parse(raw) as {
-        status: boolean;
-        data?: { ltp: string; open?: string; high?: string; low?: string; close?: string };
-      };
-      if (!json.status || !json.data?.ltp) return null;
-      const ltp = parseFloat(String(json.data.ltp));
-      const open = parseFloat(String(json.data.open ?? 0)) || ltp;
-      const high = parseFloat(String(json.data.high ?? 0)) || ltp;
-      const low = parseFloat(String(json.data.low ?? 0)) || ltp;
-      const close = parseFloat(String(json.data.close ?? 0)) || ltp;
-      return { ltp, open, high, low, close };
-    } catch (e: any) {
-      console.error('Angel getLtpData error:', e?.message);
-      return null;
     }
+    return null;
   }
 
   async fetchTimeframeData(symbol: string, timeframe: string, exchange: 'NSE' | 'NFO' | 'BSE' = 'NSE'): Promise<PriceData | null> {
@@ -971,8 +1023,12 @@ export class AngelOneDataSource {
   }
 }
 
-let angelInstance: AngelOneDataSource | null = null;
+// Persist on globalThis so the singleton (and its session) survives
+// Next.js dev-mode module reloads. Without this, API routes can get a
+// fresh instance with no session while the monitoring service still
+// holds the old one — causing /api/fetch-price to fail with "No data".
+const g = globalThis as unknown as { __angelOneSource?: AngelOneDataSource };
 export function getAngelOneSource(): AngelOneDataSource {
-  if (!angelInstance) angelInstance = new AngelOneDataSource();
-  return angelInstance;
+  if (!g.__angelOneSource) g.__angelOneSource = new AngelOneDataSource();
+  return g.__angelOneSource;
 }

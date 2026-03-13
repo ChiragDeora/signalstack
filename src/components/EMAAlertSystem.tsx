@@ -295,6 +295,15 @@ export default function EMAAlertSystem() {
       const batch = pendingPriceRef.current;
       pendingPriceRef.current = {};
       setPriceByKey((prev) => ({ ...prev, ...batch }));
+      // Clear any fetch-price errors for keys that now have live data
+      setPriceErrorByKey((prev) => {
+        const next = { ...prev };
+        let changed = false;
+        for (const key of Object.keys(batch)) {
+          if (next[key]) { delete next[key]; changed = true; }
+        }
+        return changed ? next : prev;
+      });
     }
     if (Object.keys(pendingEmaRef.current).length > 0) {
       const batch = pendingEmaRef.current;

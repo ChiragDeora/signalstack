@@ -270,6 +270,48 @@ export class EMAEngine {
       );
     }
 
+    // ── CRITICAL FIX: Late warmup fallback ──
+    // When initial warmup failed (e.g. rate-limited), lastProcessedCandleTs
+    // is still 0.  The first successful poll returns hundreds of historical
+    // candles — ALL of which pass the `> 0` filter.  Processing them one-by-
+    // one through the crossover detectors would generate dozens of stale
+    // historical alerts + email spam.
+    //
+    // Instead, treat this first batch as a late warmup: feed all closes via
+    // bulkLoad, initialise the crossover detector state, set the timestamp
+    // watermark — but do NOT generate any alerts.
+    if (state.lastProcessedCandleTs === 0 && newClosedCandles.length > 1) {
+      console.log(
+        `📊 EMA Engine: late warmup for ${symbol} (${timeframe}) — feeding ${newClosedCandles.length} candles WITHOUT generating alerts`,
+      );
+
+      const closePrices = newClosedCandles.map((c) => c.close);
+
+      // Feed all historical closes into each EMA calculator
+      for (const [, calc] of state.emas) {
+        calc.bulkLoad(closePrices);
+      }
+
+      // Initialise crossover detector lastRelation so the next real candle
+      // doesn't produce a false crossover
+      for (const detector of state.detectors) {
+        const ema1 = state.emas.get(detector.ema1Period)?.getValue();
+        const ema2 = state.emas.get(detector.ema2Period)?.getValue();
+        if (ema1 !== null && ema1 !== undefined && ema2 !== null && ema2 !== undefined) {
+          detector.checkCrossover(ema1, ema2, closePrices[closePrices.length - 1], symbol);
+        }
+      }
+
+      state.lastProcessedCandleTs = newClosedCandles[newClosedCandles.length - 1].timestamp;
+      state.isWarmedUp = state.emas.size > 0;
+      state.lastPrice = currentPrice;
+
+      console.log(
+        `📊 EMA Engine: late warmup complete for ${symbol} (${timeframe}) — ${closePrices.length} candles, ready for live alerts`,
+      );
+      return [];
+    }
+
     const alerts: CrossoverAlert[] = [];
 
     for (const candle of newClosedCandles) {

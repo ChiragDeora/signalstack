@@ -124,14 +124,14 @@ export class CrossoverService {
       if (priceData?.candleData && priceData.candleData.length > 0) {
         this.engine.warmUp(config.symbol, config.timeframe, priceData.candleData, config.userId);
 
-      // NOTE: We no longer feed the live LTP as a "seed tick" here.
-      // The warmup already initialises lastRelation on the crossover
-      // detectors using closed-candle EMA values, and processNewCandles
-      // will pick up the next closed candle on the first poll.
+        // NOTE: We no longer feed the live LTP as a "seed tick" here.
+        // The warmup already initialises lastRelation on the crossover
+        // detectors using closed-candle EMA values, and processNewCandles
+        // will pick up the next closed candle on the first poll.
 
-      // Emit initial price and EMA data
-      this.emitPriceUpdate(config.symbol, config.timeframe, priceData);
-      this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
+        // Emit initial price and EMA data
+        this.emitPriceUpdate(config.symbol, config.timeframe, priceData);
+        this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
       } else {
         console.warn(`⚠️  No historical data for warmup of ${config.symbol}`);
         this.emitStatus(config.symbol, config.timeframe, 'running', 'Running without historical warmup — EMAs will initialize from live ticks');
@@ -163,11 +163,19 @@ export class CrossoverService {
 
   /**
    * Restore all persisted watches (call on server startup so monitoring survives restarts).
+   *
+   * Watches are started sequentially with a 2-second delay between each to
+   * avoid slamming the Angel One API with concurrent requests (which triggers
+   * "Too many requests" rate limiting and causes warmup failures + alert floods).
    */
   async restoreAllWatches(configs: WatchConfig[]): Promise<void> {
     if (!configs?.length) return;
-    console.log(`📂 Restoring ${configs.length} persisted watch(es)...`);
-    for (const config of configs) {
+    console.log(`📂 Restoring ${configs.length} persisted watch(es) (staggered, 2s apart)...`);
+    for (let i = 0; i < configs.length; i++) {
+      const config = configs[i];
+      if (i > 0) {
+        await new Promise((r) => setTimeout(r, 2000));
+      }
       try {
         const result = await this.startMonitoring(config);
         if (result.success) console.log(`   ✓ ${config.symbol} (${config.timeframe})`);
