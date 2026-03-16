@@ -337,7 +337,11 @@ export default function EMAAlertSystem() {
       timeout: 20000,
     });
     socketRef.current = socket;
-    socket.on('connect', () => setConnected(true));
+    socket.on('connect', () => {
+      setConnected(true);
+      // Join user-specific room so we only receive our own updates
+      if (userId) socket.emit('join:user', userId);
+    });
     socket.on('disconnect', (reason) => {
       setConnected(false);
       if (reason === 'io server disconnect') socket.connect();
@@ -403,7 +407,29 @@ export default function EMAAlertSystem() {
       if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
       socket.disconnect();
     };
-  }, [scheduleFlush, flushSocketUpdates]);
+  }, [scheduleFlush, flushSocketUpdates, userId]);
+
+  // Join user room when userId becomes available (Clerk loads async after socket connects)
+  useEffect(() => {
+    if (userId && socketRef.current?.connected) {
+      socketRef.current.emit('join:user', userId);
+    }
+  }, [userId]);
+
+  // Fetch persisted alerts from server on mount
+  useEffect(() => {
+    if (!mounted || !userId) return;
+    axios.get<{ success: boolean; alerts?: AlertData[]; count?: number }>('/api/alerts')
+      .then((res) => {
+        if (res.data.success && Array.isArray(res.data.alerts) && res.data.alerts.length > 0) {
+          setAlerts(res.data.alerts);
+          console.log(`[EMAAlertSystem] Restored ${res.data.alerts.length} alert(s) from server`);
+        }
+      })
+      .catch((err: any) => {
+        console.warn('[EMAAlertSystem] Failed to load alerts:', err.response?.status, err.message);
+      });
+  }, [mounted, userId]);
 
   // Poll EMA status when monitoring and socket may not deliver (e.g. mobile, deploy without persistent WS)
   useEffect(() => {

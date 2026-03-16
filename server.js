@@ -26,9 +26,17 @@ app.prepare().then(async () => {
   // Make io accessible to API routes via global
   global.__io = io;
 
-  // Socket.IO connection handling
+  // Socket.IO connection handling with per-user rooms
   io.on('connection', (socket) => {
     console.log(`🔌 Client connected: ${socket.id}`);
+
+    // Client sends userId after connecting to join their private room
+    socket.on('join:user', (userId) => {
+      if (userId && typeof userId === 'string') {
+        socket.join(`user:${userId}`);
+        console.log(`🔌 Socket ${socket.id} joined room user:${userId}`);
+      }
+    });
 
     socket.on('disconnect', () => {
       console.log(`🔌 Client disconnected: ${socket.id}`);

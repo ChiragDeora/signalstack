@@ -110,14 +110,14 @@ export class CrossoverService {
     }
 
     // Emit status
-    this.emitStatus(config.symbol, config.timeframe, 'starting', 'Fetching historical data for EMA warmup...');
+    this.emitStatus(config.symbol, config.timeframe, 'starting', 'Fetching historical data for EMA warmup...', config.userId);
 
     // 1. Add to engine
     this.engine.addWatch(config);
 
     // 2. Fetch historical data for EMA warmup
     try {
-      this.emitStatus(config.symbol, config.timeframe, 'warming_up', 'Loading historical candles...');
+      this.emitStatus(config.symbol, config.timeframe, 'warming_up', 'Loading historical candles...', config.userId);
 
       const priceData = await this.dataSource.fetchTimeframeData(config.symbol, config.timeframe, (config.exchange as 'NSE' | 'NFO' | 'BSE') || 'NSE');
 
@@ -130,12 +130,12 @@ export class CrossoverService {
         // will pick up the next closed candle on the first poll.
 
         // Emit initial price and EMA data
-        this.emitPriceUpdate(config.symbol, config.timeframe, priceData);
+        this.emitPriceUpdate(config.symbol, config.timeframe, priceData, config.userId);
         this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
       } else {
         console.warn(`⚠️  No historical data for warmup of ${config.symbol}`);
-        this.emitStatus(config.symbol, config.timeframe, 'running', 'Running without historical warmup — EMAs will initialize from live ticks');
-        if (priceData) this.emitPriceUpdate(config.symbol, config.timeframe, priceData);
+        this.emitStatus(config.symbol, config.timeframe, 'running', 'Running without historical warmup — EMAs will initialize from live ticks', config.userId);
+        if (priceData) this.emitPriceUpdate(config.symbol, config.timeframe, priceData, config.userId);
         this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
       }
     } catch (error: any) {
@@ -157,7 +157,7 @@ export class CrossoverService {
       console.error(`Initial poll error for ${config.symbol}:`, err)
     );
 
-    this.emitStatus(config.symbol, config.timeframe, 'running', 'Monitoring active');
+    this.emitStatus(config.symbol, config.timeframe, 'running', 'Monitoring active', config.userId);
     return { success: true, message: `Monitoring started for ${config.symbol} (${config.timeframe})` };
   }
 
@@ -217,7 +217,7 @@ export class CrossoverService {
     }
 
     this.engine.removeWatch(symbol, timeframe, userId);
-    this.emitStatus(symbol, timeframe || '', 'stopped', 'Monitoring stopped');
+    this.emitStatus(symbol, timeframe || '', 'stopped', 'Monitoring stopped', userId);
     console.log(`🛑 Stopped monitoring ${symbol}${timeframe ? ` (${timeframe})` : ''}${userId ? ' [user]' : ''}`);
   }
 
@@ -236,7 +236,7 @@ export class CrossoverService {
       if (!priceData) return;
 
       // Emit price update for UI display
-      this.emitPriceUpdate(config.symbol, config.timeframe, priceData);
+      this.emitPriceUpdate(config.symbol, config.timeframe, priceData, config.userId);
 
       // Process only newly-closed candles through the EMA engine.
       // The live LTP is passed for display only — it is NOT fed into the EMAs.
@@ -286,8 +286,13 @@ export class CrossoverService {
       }
       this.lastAlertByPairAndCandle.set(pairKey, alert.timestamp);
 
-      addAlert(alert);
-      this.io?.emit('alert:crossover', alert);
+      addAlert(alert, userId);
+      // Emit to user-specific room if userId is set, otherwise broadcast
+      if (userId && this.io) {
+        this.io.to(`user:${userId}`).emit('alert:crossover', alert);
+      } else {
+        this.io?.emit('alert:crossover', alert);
+      }
 
       this.sendPushNotification(alert, userId);
       userEmailPromise.then((email) => sendCrossoverAlertEmail(alert, email)).catch((e) =>
@@ -297,10 +302,10 @@ export class CrossoverService {
   }
 
   /**
-   * Emit price update via Socket.IO
+   * Emit price update via Socket.IO (to user room if userId set)
    */
-  private emitPriceUpdate(symbol: string, timeframe: string, priceData: any): void {
-    this.io?.emit('price:update', {
+  private emitPriceUpdate(symbol: string, timeframe: string, priceData: any, userId?: string): void {
+    const payload: PriceUpdate = {
       symbol,
       timeframe,
       price: priceData.price,
@@ -309,34 +314,50 @@ export class CrossoverService {
       currency: priceData.currency || 'INR',
       source: priceData.source || 'unknown',
       timestamp: priceData.timestamp || new Date().toISOString(),
-    } as PriceUpdate);
-  }
-
-  /**
-   * Emit EMA status update via Socket.IO
-   */
-  private emitEmaUpdate(symbol: string, timeframe: string, userId?: string): void {
-    const status = this.engine.getStatus(symbol, timeframe, userId);
-    if (status) {
-      this.io?.emit('ema:update', {
-        symbol,
-        timeframe,
-        emas: status.emas,
-        warmupProgress: status.warmupProgress,
-      } as EmaUpdate);
+    };
+    if (userId && this.io) {
+      this.io.to(`user:${userId}`).emit('price:update', payload);
+    } else {
+      this.io?.emit('price:update', payload);
     }
   }
 
   /**
-   * Emit monitoring status via Socket.IO
+   * Emit EMA status update via Socket.IO (to user room if userId set)
+   */
+  private emitEmaUpdate(symbol: string, timeframe: string, userId?: string): void {
+    const status = this.engine.getStatus(symbol, timeframe, userId);
+    if (status) {
+      const payload: EmaUpdate = {
+        symbol,
+        timeframe,
+        emas: status.emas,
+        warmupProgress: status.warmupProgress,
+      };
+      if (userId && this.io) {
+        this.io.to(`user:${userId}`).emit('ema:update', payload);
+      } else {
+        this.io?.emit('ema:update', payload);
+      }
+    }
+  }
+
+  /**
+   * Emit monitoring status via Socket.IO (to user room if userId set)
    */
   private emitStatus(
     symbol: string,
     timeframe: string,
     status: MonitorStatus['status'],
     message?: string,
+    userId?: string,
   ): void {
-    this.io?.emit('monitor:status', { symbol, timeframe, status, message } as MonitorStatus);
+    const payload: MonitorStatus = { symbol, timeframe, status, message };
+    if (userId && this.io) {
+      this.io.to(`user:${userId}`).emit('monitor:status', payload);
+    } else {
+      this.io?.emit('monitor:status', payload);
+    }
   }
 
   // =========================
