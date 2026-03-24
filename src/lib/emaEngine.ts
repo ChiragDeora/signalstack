@@ -8,6 +8,41 @@ import { EMACalculator, CrossoverDetector } from './ema';
 import { CandleData, CrossoverAlert, WatchConfig, EmaStatus } from './types';
 import { randomUUID } from 'crypto';
 
+/**
+ * Aggregate 1-hour candles into 4-hour candles.
+ * Angel One has no native 4h interval (we fetch ONE_HOUR).
+ * Buckets align to 9:15 IST session open.
+ */
+function aggregateTo4h(candles: CandleData[]): CandleData[] {
+  if (candles.length === 0) return [];
+  const FOUR_HOURS_MS = 4 * 60 * 60_000;
+  const IST_OFFSET_MS = 5.5 * 60 * 60_000;
+  const MARKET_OPEN_MINUTES = 9 * 60 + 15;
+
+  const buckets = new Map<number, CandleData>();
+  for (const c of candles) {
+    const istMs = c.timestamp + IST_OFFSET_MS;
+    const istDate = new Date(istMs);
+    const midnightIst = new Date(istDate.getFullYear(), istDate.getMonth(), istDate.getDate()).getTime();
+    const minutesSinceMidnight = (istMs - midnightIst) / 60_000;
+    const minutesSinceOpen = minutesSinceMidnight - MARKET_OPEN_MINUTES;
+    const bucketIndex = Math.floor(Math.max(0, minutesSinceOpen) / 240);
+    const bucketStartIst = midnightIst + MARKET_OPEN_MINUTES * 60_000 + bucketIndex * FOUR_HOURS_MS;
+    const bucketKey = bucketStartIst - IST_OFFSET_MS;
+
+    const existing = buckets.get(bucketKey);
+    if (!existing) {
+      buckets.set(bucketKey, { timestamp: bucketKey, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume });
+    } else {
+      existing.high = Math.max(existing.high, c.high);
+      existing.low = Math.min(existing.low, c.low);
+      existing.close = c.close;
+      existing.volume += c.volume;
+    }
+  }
+  return Array.from(buckets.values()).sort((a, b) => a.timestamp - b.timestamp);
+}
+
 /** Convert timeframe string to duration in milliseconds */
 function timeframeToMs(timeframe: string): number {
   const map: Record<string, number> = {
@@ -112,8 +147,11 @@ export class EMAEngine {
     const state = this.symbols.get(key);
     if (!state) return;
 
-    // Sort candles chronologically
-    const sorted = [...candles].sort((a, b) => a.timestamp - b.timestamp);
+    let sorted = [...candles].sort((a, b) => a.timestamp - b.timestamp);
+
+    if (timeframe === '4h') {
+      sorted = aggregateTo4h(sorted);
+    }
 
     // Exclude the current (still-forming) candle: a candle is "closed" when
     // its open-time + interval duration <= now.  This ensures we only warm up
@@ -250,8 +288,10 @@ export class EMAEngine {
     const intervalMs = timeframeToMs(timeframe);
     const now = Date.now();
 
-    // Sort candles chronologically
-    const sorted = [...candles].sort((a, b) => a.timestamp - b.timestamp);
+    let sorted = [...candles].sort((a, b) => a.timestamp - b.timestamp);
+    if (timeframe === '4h') {
+      sorted = aggregateTo4h(sorted);
+    }
 
     // Only process candles that are:
     //  1. Newer than the last candle we already processed
