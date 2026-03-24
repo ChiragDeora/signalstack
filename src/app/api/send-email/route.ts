@@ -3,8 +3,15 @@ import { auth } from '@clerk/nextjs/server';
 import { sendEmail, isBrevoConfigured } from '@/lib/brevoEmail';
 
 /**
- * POST /api/send-email — Send an email via Brevo SMTP (relay).
- * Requires sign-in. Body: { to: string | string[], subject: string, text?: string, html?: string }
+ * POST /api/send-email — Send an email via Brevo.
+ * Requires sign-in.
+ * Body: {
+ *   to: string | string[],
+ *   subject: string,
+ *   text?: string,
+ *   html?: string,
+ *   attachments?: { filename: string; content: string; contentType?: string }[]
+ * }
  */
 export async function POST(req: NextRequest) {
   try {
@@ -20,7 +27,7 @@ export async function POST(req: NextRequest) {
     }
 
     const body = await req.json();
-    const { to, subject, text, html } = body;
+    const { to, subject, text, html, attachments } = body;
     if (!to || !subject) {
       return NextResponse.json(
         { success: false, error: 'Missing "to" or "subject"' },
@@ -33,8 +40,28 @@ export async function POST(req: NextRequest) {
         { status: 400 },
       );
     }
+    if (attachments !== undefined) {
+      const valid =
+        Array.isArray(attachments) &&
+        attachments.every(
+          (a) =>
+            a &&
+            typeof a === 'object' &&
+            typeof a.filename === 'string' &&
+            a.filename.trim().length > 0 &&
+            typeof a.content === 'string' &&
+            a.content.trim().length > 0 &&
+            (a.contentType === undefined || typeof a.contentType === 'string'),
+        );
+      if (!valid) {
+        return NextResponse.json(
+          { success: false, error: 'Invalid "attachments" format' },
+          { status: 400 },
+        );
+      }
+    }
 
-    const result = await sendEmail({ to, subject, text, html });
+    const result = await sendEmail({ to, subject, text, html, attachments });
     if (!result.ok) {
       return NextResponse.json(
         { success: false, error: result.error || 'Send failed' },

@@ -10,6 +10,12 @@ import type { Transporter } from 'nodemailer';
 
 const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
 
+export type EmailAttachment = {
+  filename: string;
+  content: string;
+  contentType?: string;
+};
+
 function getBrevoConfig() {
   const host = process.env.BREVO_SMTP_HOST || 'smtp-relay.brevo.com';
   const port = parseInt(process.env.BREVO_SMTP_PORT || '587', 10);
@@ -55,6 +61,7 @@ async function sendEmailViaApi(options: {
   text?: string;
   html?: string;
   replyTo?: string;
+  attachments?: EmailAttachment[];
 }): Promise<{ ok: boolean; error?: string }> {
   const apiKey = process.env.BREVO_API_KEY?.trim();
   if (!apiKey) return { ok: false, error: 'BREVO_API_KEY not set' };
@@ -71,6 +78,13 @@ async function sendEmailViaApi(options: {
   if (options.text) body.textContent = options.text;
   if (!body.htmlContent && !body.textContent) body.textContent = '(No content)';
   if (options.replyTo) body.replyTo = { email: options.replyTo };
+  if (options.attachments?.length) {
+    body.attachment = options.attachments.map((a) => ({
+      name: a.filename,
+      content: a.content,
+      type: a.contentType,
+    }));
+  }
   try {
     const res = await fetch(BREVO_API_URL, {
       method: 'POST',
@@ -106,6 +120,7 @@ export async function sendEmail(options: {
   text?: string;
   html?: string;
   replyTo?: string;
+  attachments?: EmailAttachment[];
 }): Promise<{ ok: boolean; error?: string }> {
   if (process.env.BREVO_API_KEY?.trim()) {
     console.log('Using Brevo API (BREVO_API_KEY is set)');
@@ -136,6 +151,12 @@ export async function sendEmail(options: {
       text: options.text,
       html: options.html,
       replyTo: options.replyTo,
+      attachments: options.attachments?.map((a) => ({
+        filename: a.filename,
+        content: a.content,
+        contentType: a.contentType,
+        encoding: 'base64',
+      })),
     });
     if (info.messageId) {
       console.log('Brevo SMTP accepted, messageId:', info.messageId);
@@ -193,6 +214,7 @@ export async function sendCrossoverAlertEmail(
     timestamp: string;
   },
   userEmail?: string | null,
+  attachments?: EmailAttachment[],
 ): Promise<void> {
   const envRecipients = getAlertRecipientEmails();
   const recipients = [...envRecipients];
@@ -219,6 +241,6 @@ export async function sendCrossoverAlertEmail(
     `<p>EMA(${alert.fastPeriod}) crossed ${alert.crossoverType === 'bullish' ? 'above' : 'below'} EMA(${alert.slowPeriod}) at ${alert.currency} ${alert.price}</p>` +
     `<p><small>${timeStr}</small></p>`;
 
-  const result = await sendEmail({ to: recipients, subject, text, html });
+  const result = await sendEmail({ to: recipients, subject, text, html, attachments });
   if (!result.ok) console.warn('Brevo crossover alert email failed:', result.error);
 }

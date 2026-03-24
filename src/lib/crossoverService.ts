@@ -19,6 +19,8 @@ import {
   getAlertRecipientEmails,
 } from './brevoEmail';
 import { getClerkUserEmail } from './clerkUserEmail';
+import { buildCrossoverChartAttachment } from './alertChart';
+import { CandleData } from './types';
 // marketHours removed — alerts now fire regardless of trading hours
 
 // web-push is optional — only needed for push notifications (see OpenReplay Web Push guide)
@@ -254,7 +256,7 @@ export class CrossoverService {
       this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
 
       // Handle crossover alerts
-      this.handleAlerts(alerts, config.userId, config.exchange);
+      this.handleAlerts(alerts, config.userId, config.exchange, priceData.candleData);
     } catch (error) {
       console.error(`❌ Poll error for ${config.symbol}:`, error);
     }
@@ -267,7 +269,7 @@ export class CrossoverService {
    * - Only send **one** alert per symbol + timeframe + EMA pair + direction **per candle timestamp**.
    *   This means late data corrections or repeated polls for the same candle (including 1m candles) will not spam extra emails.
    */
-  private handleAlerts(alerts: CrossoverAlert[], userId?: string, _exchange?: string): void {
+  private handleAlerts(alerts: CrossoverAlert[], userId?: string, _exchange?: string, candleData?: CandleData[]): void {
     const userEmailPromise =
       userId && alerts.length > 0 ? getClerkUserEmail(userId) : Promise.resolve(null);
     for (const alert of alerts) {
@@ -295,7 +297,9 @@ export class CrossoverService {
       }
 
       this.sendPushNotification(alert, userId);
-      userEmailPromise.then((email) => sendCrossoverAlertEmail(alert, email)).catch((e) =>
+      const chartAttachment = buildCrossoverChartAttachment(alert, candleData);
+      const attachments = chartAttachment ? [chartAttachment] : undefined;
+      userEmailPromise.then((email) => sendCrossoverAlertEmail(alert, email, attachments)).catch((e) =>
         console.warn('Crossover email alert failed:', e),
       );
     }
