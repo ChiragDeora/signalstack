@@ -126,17 +126,14 @@ export class CrossoverDetector {
    * Minimum percentage gap between the two EMAs before we register
    * a change in relation.  Expressed as a fraction of the slow EMA.
    *
-   * Example: 0.001 = 0.1%.  For a stock at ₹1000, the fast EMA must
-   * be at least ₹1 above/below the slow EMA before we consider the
-   * cross confirmed.  This eliminates the flicker zone where EMAs
-   * are nearly equal in a sideways market.
+   * Example: 0.0005 = 0.05%.  For a stock at ₹1000, the fast EMA must
+   * be at least ₹0.50 above/below the slow EMA.
    *
-   * Tune this value based on your use case:
-   *   0.0005 (0.05%) — very sensitive, good for large-cap / low-vol
-   *   0.001  (0.1%)  — balanced default
-   *   0.002  (0.2%)  — conservative, fewer false signals
+   * Reduced from 0.1% to 0.05% — the previous 0.1% was too aggressive
+   * and could swallow legitimate crossovers on low-volatility instruments
+   * or options with small absolute price differences between EMAs.
    */
-  private static readonly DEAD_ZONE_PCT = 0.001;
+  private static readonly DEAD_ZONE_PCT = 0.0005;
 
   constructor(
     ema1Period: number,
@@ -151,24 +148,36 @@ export class CrossoverDetector {
   }
 
   /**
+   * Initialise the detector's lastRelation WITHOUT triggering any alert.
+   * Uses raw comparison (no dead zone) so the initial state is always correct.
+   *
+   * Called during warmup / late-warmup to seed the detector.
+   */
+  initRelation(ema1Value: number, ema2Value: number): void {
+    if (!ema1Value || !ema2Value) return;
+    // Raw comparison — no dead zone — so the initial state matches reality
+    this.lastRelation = ema1Value >= ema2Value ? 'above' : 'below';
+  }
+
+  /**
    * Check if a crossover has occurred.
    * ema1Value = fast EMA (shorter period), ema2Value = slow EMA (longer period)
    * Returns crossover info if detected, null otherwise.
    *
-   * FIX 1: Dead zone — EMAs must diverge by at least DEAD_ZONE_PCT of the
-   *        slow EMA value before the relation changes.  When both EMAs are
-   *        within the dead zone, we hold the previous relation, preventing
-   *        flicker-alerts in sideways markets.
+   * Dead zone prevents flicker: EMAs must diverge by at least DEAD_ZONE_PCT
+   * before the relation changes.  The dead zone only HOLDS previous state; it
+   * never INFERS initial state (that's done by initRelation).
    *
-   * FIX 2: Equality — previously, ema1 === ema2 defaulted to 'below', which
-   *        could trigger a phantom bearish signal.  Now it stays in the dead
-   *        zone and holds the previous relation.
+   * @param candleTimestamp  ISO timestamp of the candle that produced these EMA
+   *                         values.  Used in the alert so the timestamp reflects
+   *                         WHEN the crossover occurred, not when we detected it.
    */
   checkCrossover(
     ema1Value: number,
     ema2Value: number,
     price: number,
     symbol: string,
+    candleTimestamp?: string,
   ): CrossoverResult | null {
     if (!ema1Value || !ema2Value) return null;
 
@@ -176,29 +185,28 @@ export class CrossoverDetector {
     const threshold = ema2Value * CrossoverDetector.DEAD_ZONE_PCT;
     const diff = ema1Value - ema2Value;
 
-    let currentRelation: 'above' | 'below' | null;
+    let currentRelation: 'above' | 'below';
 
-    if (Math.abs(diff) < threshold) {
-      // Inside the dead zone — do NOT change relation.
-      // If we have no prior relation yet (first call), infer from sign
-      // so warmup initialization still works.
-      if (this.lastRelation === null) {
-        currentRelation = diff >= 0 ? 'above' : 'below';
-      } else {
-        currentRelation = this.lastRelation; // hold — no flicker
-      }
+    if (Math.abs(diff) < threshold && this.lastRelation !== null) {
+      // Inside the dead zone AND we already have a baseline — hold to prevent flicker
+      currentRelation = this.lastRelation;
     } else {
-      currentRelation = diff > 0 ? 'above' : 'below';
+      // Outside dead zone, OR first call (no baseline yet) — use raw comparison
+      currentRelation = diff >= 0 ? 'above' : 'below';
     }
 
     if (this.lastRelation && this.lastRelation !== currentRelation) {
       const crossoverType = currentRelation === 'above' ? 'bullish' : 'bearish';
 
+      // Always update lastRelation even if we don't track this direction.
+      // This ensures the detector stays in sync with reality, so the NEXT
+      // crossover in the opposite (tracked) direction fires correctly.
+      this.lastRelation = currentRelation;
+
       if (
         (crossoverType === 'bullish' && this.trackBullish) ||
         (crossoverType === 'bearish' && this.trackBearish)
       ) {
-        this.lastRelation = currentRelation;
         return {
           symbol,
           type: crossoverType,
@@ -207,9 +215,12 @@ export class CrossoverDetector {
           ema1Value,
           ema2Value,
           price,
-          timestamp: new Date().toISOString(),
+          timestamp: candleTimestamp || new Date().toISOString(),
         };
       }
+
+      // Crossover detected but not tracked — no alert, but state IS updated (above)
+      return null;
     }
 
     this.lastRelation = currentRelation;

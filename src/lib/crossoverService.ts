@@ -297,16 +297,17 @@ export class CrossoverService {
       }
 
       this.sendPushNotification(alert, userId);
+      // Chart generation is async (sharp SVG→PNG) — run in parallel with email lookup
       const chartPromise = buildCrossoverChartAttachment(alert, candleData).catch((e) => {
         console.warn('Chart generation failed:', e);
         return null;
       });
-      Promise.all([userEmailPromise, chartPromise])
-        .then(([email, chartAttachment]) => {
-          const attachments = chartAttachment ? [chartAttachment] : undefined;
-          return sendCrossoverAlertEmail(alert, email, attachments);
-        })
-        .catch((e) => console.warn('Crossover email alert failed:', e));
+      Promise.all([userEmailPromise, chartPromise]).then(([email, chartAttachment]) => {
+        const attachments = chartAttachment ? [chartAttachment] : undefined;
+        return sendCrossoverAlertEmail(alert, email, attachments);
+      }).catch((e) =>
+        console.warn('Crossover email alert failed:', e),
+      );
     }
   }
 
