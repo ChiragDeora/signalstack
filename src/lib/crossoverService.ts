@@ -297,11 +297,16 @@ export class CrossoverService {
       }
 
       this.sendPushNotification(alert, userId);
-      const chartAttachment = buildCrossoverChartAttachment(alert, candleData);
-      const attachments = chartAttachment ? [chartAttachment] : undefined;
-      userEmailPromise.then((email) => sendCrossoverAlertEmail(alert, email, attachments)).catch((e) =>
-        console.warn('Crossover email alert failed:', e),
-      );
+      const chartPromise = buildCrossoverChartAttachment(alert, candleData).catch((e) => {
+        console.warn('Chart generation failed:', e);
+        return null;
+      });
+      Promise.all([userEmailPromise, chartPromise])
+        .then(([email, chartAttachment]) => {
+          const attachments = chartAttachment ? [chartAttachment] : undefined;
+          return sendCrossoverAlertEmail(alert, email, attachments);
+        })
+        .catch((e) => console.warn('Crossover email alert failed:', e));
     }
   }
 

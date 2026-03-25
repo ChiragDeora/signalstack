@@ -1,3 +1,4 @@
+import sharp from 'sharp';
 import { CandleData, CrossoverAlert } from './types';
 
 type Attachment = {
@@ -53,10 +54,10 @@ function sanitizeFilePart(input: string): string {
   return input.replace(/[^a-zA-Z0-9._-]/g, '_');
 }
 
-export function buildCrossoverChartAttachment(
+export async function buildCrossoverChartAttachment(
   alert: CrossoverAlert,
   candles: CandleData[] | undefined,
-): Attachment | null {
+): Promise<Attachment | null> {
   if (!candles || candles.length < Math.max(alert.slowPeriod + 5, 20)) return null;
 
   const sorted = [...candles].sort((a, b) => a.timestamp - b.timestamp);
@@ -135,9 +136,16 @@ export function buildCrossoverChartAttachment(
   <text x="${left + 380}" y="${height - 48}" font-size="12" font-family="Arial, sans-serif" fill="${crossColor}">${alert.crossoverType.toUpperCase()} crossover</text>
 </svg>`;
 
-  return {
-    filename: `${sanitizeFilePart(alert.symbol)}_${sanitizeFilePart(alert.timeframe)}_${alert.crossoverType}_crossover.svg`,
-    content: Buffer.from(svg, 'utf8').toString('base64'),
-    contentType: 'image/svg+xml',
-  };
+  try {
+    // Convert SVG→PNG so common email clients render it reliably.
+    const pngBuffer = await sharp(Buffer.from(svg, 'utf8')).png().toBuffer();
+    return {
+      filename: `${sanitizeFilePart(alert.symbol)}_${sanitizeFilePart(alert.timeframe)}_${alert.crossoverType}_crossover.png`,
+      content: pngBuffer.toString('base64'),
+      contentType: 'image/png',
+    };
+  } catch (err) {
+    console.warn('Chart PNG generation failed:', err);
+    return null;
+  }
 }
