@@ -634,6 +634,17 @@ export class AngelOneDataSource {
         }
         const json = JSON.parse(raw) as { status: boolean; data?: Array<string | number>[]; message?: string };
         if (!json.status || !Array.isArray(json.data)) {
+          // Angel sometimes returns HTTP 200 with auth-expiry payloads like:
+          // { "status": false, "message": "Invalid Token" }.
+          if (json.message && /invalid token|session expired|jwt/i.test(json.message)) {
+            if (!retried) {
+              console.warn(`⚠️  Angel getCandleData auth expired for ${symbol} (${exchange}) — refreshing token and retrying once`);
+              await this.refreshToken();
+              return this.fetchHistoricalCandles(symbol, timeframe, candleCount, exchange, true);
+            }
+            this.session = null;
+            return [];
+          }
           // Check for "Too many requests" in the JSON message body (Angel returns HTTP 200 + status=false)
           if (json.message && /too many requests/i.test(json.message) && attempt < MAX_RATE_LIMIT_RETRIES) {
             const delay = (attempt + 1) * 2000;
@@ -713,6 +724,17 @@ export class AngelOneDataSource {
           message?: string;
         };
         if (!json.status || !json.data?.ltp) {
+          // Angel sometimes returns HTTP 200 with auth-expiry payloads like:
+          // { "status": false, "message": "Invalid Token" }.
+          if (json.message && /invalid token|session expired|jwt/i.test(json.message)) {
+            if (!retried) {
+              console.warn(`⚠️  Angel getLtpData auth expired for ${symbol} (${exchange}) — refreshing token and retrying once`);
+              await this.refreshToken();
+              return this.fetchLTP(symbol, exchange, true);
+            }
+            this.session = null;
+            return null;
+          }
           // "Too many requests" returned as HTTP 200 + status=false
           if (json.message && /too many requests/i.test(json.message) && attempt < MAX_RATE_LIMIT_RETRIES) {
             const delay = (attempt + 1) * 1500;
