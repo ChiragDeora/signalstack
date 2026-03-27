@@ -586,8 +586,11 @@ export class AngelOneDataSource {
     const toDate = new Date();
     const maxDays = INTERVAL_MAX_DAYS[interval] ?? 90;
     const fromDate = new Date(toDate.getTime() - maxDays * 24 * 60 * 60 * 1000);
-    const fromStr = fromDate.toISOString().slice(0, 16).replace('T', ' ');
-    const toStr = toDate.toISOString().slice(0, 16).replace('T', ' ');
+    // Angel One expects IST timestamps, NOT UTC. toISOString() returns UTC which is 5.5h behind IST.
+    // Add 5.5h (19800000ms) offset before formatting to convert UTC → IST.
+    const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+    const fromStr = new Date(fromDate.getTime() + IST_OFFSET_MS).toISOString().slice(0, 16).replace('T', ' ');
+    const toStr = new Date(toDate.getTime() + IST_OFFSET_MS).toISOString().slice(0, 16).replace('T', ' ');
 
     // Retry loop with exponential backoff for "Too many requests" rate limiting
     const MAX_RATE_LIMIT_RETRIES = 3;
