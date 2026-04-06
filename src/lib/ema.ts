@@ -122,18 +122,26 @@ export class CrossoverDetector {
   private trackBearish: boolean;
   private lastRelation: 'above' | 'below' | null = null;
 
-  /**
-   * Minimum percentage gap between the two EMAs before we register
-   * a change in relation.  Expressed as a fraction of the slow EMA.
-   *
-   * Example: 0.0005 = 0.05%.  For a stock at ₹1000, the fast EMA must
-   * be at least ₹0.50 above/below the slow EMA.
-   *
-   * Reduced from 0.1% to 0.05% — the previous 0.1% was too aggressive
-   * and could swallow legitimate crossovers on low-volatility instruments
-   * or options with small absolute price differences between EMAs.
-   */
-  private static readonly DEAD_ZONE_PCT = 0.0005;
+  // ================================================================
+  // ACTIVE: Cooldown approach (immediate detection, flicker suppressed)
+  //   - Detects crossover on the exact candle (no delay)
+  //   - Suppresses reverse crossover for 2 candles to prevent flicker
+  //
+  // If this doesn't work, comment out the COOLDOWN section and
+  // uncomment the DEAD ZONE section below.
+  // ================================================================
+  private static readonly COOLDOWN_CANDLES = 2;
+  private cooldownRemaining: number = 0;
+
+  // ================================================================
+  // BACKUP: Dead zone approach (original, 1-candle-late but proven)
+  //   - Holds previous state when EMAs are within 0.05% of each other
+  //   - Causes crossover to fire 1 candle late (2 candle total delay)
+  //
+  // To revert: uncomment DEAD_ZONE_PCT below, and swap the
+  // checkCrossover method to the dead-zone version at the bottom.
+  // ================================================================
+  // private static readonly DEAD_ZONE_PCT = 0.0005;
 
   constructor(
     ema1Period: number,
@@ -149,28 +157,24 @@ export class CrossoverDetector {
 
   /**
    * Initialise the detector's lastRelation WITHOUT triggering any alert.
-   * Uses raw comparison (no dead zone) so the initial state is always correct.
+   * Uses raw comparison so the initial state is always correct.
    *
    * Called during warmup / late-warmup to seed the detector.
    */
   initRelation(ema1Value: number, ema2Value: number): void {
     if (!ema1Value || !ema2Value) return;
-    // Raw comparison — no dead zone — so the initial state matches reality
     this.lastRelation = ema1Value >= ema2Value ? 'above' : 'below';
   }
 
+  // ================================================================
+  // ACTIVE: Cooldown-based checkCrossover
+  // ================================================================
   /**
    * Check if a crossover has occurred.
-   * ema1Value = fast EMA (shorter period), ema2Value = slow EMA (longer period)
-   * Returns crossover info if detected, null otherwise.
    *
-   * Dead zone prevents flicker: EMAs must diverge by at least DEAD_ZONE_PCT
-   * before the relation changes.  The dead zone only HOLDS previous state; it
-   * never INFERS initial state (that's done by initRelation).
-   *
-   * @param candleTimestamp  ISO timestamp of the candle that produced these EMA
-   *                         values.  Used in the alert so the timestamp reflects
-   *                         WHEN the crossover occurred, not when we detected it.
+   * Uses raw comparison for immediate detection, then a candle-count cooldown
+   * to suppress flicker (rapid back-and-forth crossovers when EMAs hover
+   * near each other).
    */
   checkCrossover(
     ema1Value: number,
@@ -181,27 +185,23 @@ export class CrossoverDetector {
   ): CrossoverResult | null {
     if (!ema1Value || !ema2Value) return null;
 
-    // ── Dead zone: hold previous relation if EMAs are too close ──
-    const threshold = ema2Value * CrossoverDetector.DEAD_ZONE_PCT;
     const diff = ema1Value - ema2Value;
+    const currentRelation: 'above' | 'below' = diff >= 0 ? 'above' : 'below';
 
-    let currentRelation: 'above' | 'below';
-
-    if (Math.abs(diff) < threshold && this.lastRelation !== null) {
-      // Inside the dead zone AND we already have a baseline — hold to prevent flicker
-      currentRelation = this.lastRelation;
-    } else {
-      // Outside dead zone, OR first call (no baseline yet) — use raw comparison
-      currentRelation = diff >= 0 ? 'above' : 'below';
+    // During cooldown: keep state in sync but suppress alerts
+    if (this.cooldownRemaining > 0) {
+      this.cooldownRemaining--;
+      this.lastRelation = currentRelation;
+      return null;
     }
 
     if (this.lastRelation && this.lastRelation !== currentRelation) {
       const crossoverType = currentRelation === 'above' ? 'bullish' : 'bearish';
 
-      // Always update lastRelation even if we don't track this direction.
-      // This ensures the detector stays in sync with reality, so the NEXT
-      // crossover in the opposite (tracked) direction fires correctly.
       this.lastRelation = currentRelation;
+
+      // Start cooldown to prevent flicker-back
+      this.cooldownRemaining = CrossoverDetector.COOLDOWN_CANDLES;
 
       if (
         (crossoverType === 'bullish' && this.trackBullish) ||
@@ -219,7 +219,6 @@ export class CrossoverDetector {
         };
       }
 
-      // Crossover detected but not tracked — no alert, but state IS updated (above)
       return null;
     }
 
@@ -227,11 +226,64 @@ export class CrossoverDetector {
     return null;
   }
 
+  // ================================================================
+  // BACKUP: Dead-zone-based checkCrossover (original proven version)
+  // To revert: rename this to checkCrossover and comment out the
+  // cooldown version above. Also uncomment DEAD_ZONE_PCT and
+  // comment out COOLDOWN_CANDLES + cooldownRemaining.
+  // ================================================================
+  // checkCrossover_deadzone(
+  //   ema1Value: number,
+  //   ema2Value: number,
+  //   price: number,
+  //   symbol: string,
+  //   candleTimestamp?: string,
+  // ): CrossoverResult | null {
+  //   if (!ema1Value || !ema2Value) return null;
+  //
+  //   const threshold = ema2Value * CrossoverDetector.DEAD_ZONE_PCT;
+  //   const diff = ema1Value - ema2Value;
+  //
+  //   let currentRelation: 'above' | 'below';
+  //
+  //   if (Math.abs(diff) < threshold && this.lastRelation !== null) {
+  //     currentRelation = this.lastRelation;
+  //   } else {
+  //     currentRelation = diff >= 0 ? 'above' : 'below';
+  //   }
+  //
+  //   if (this.lastRelation && this.lastRelation !== currentRelation) {
+  //     const crossoverType = currentRelation === 'above' ? 'bullish' : 'bearish';
+  //     this.lastRelation = currentRelation;
+  //
+  //     if (
+  //       (crossoverType === 'bullish' && this.trackBullish) ||
+  //       (crossoverType === 'bearish' && this.trackBearish)
+  //     ) {
+  //       return {
+  //         symbol,
+  //         type: crossoverType,
+  //         ema1Period: this.ema1Period,
+  //         ema2Period: this.ema2Period,
+  //         ema1Value,
+  //         ema2Value,
+  //         price,
+  //         timestamp: candleTimestamp || new Date().toISOString(),
+  //       };
+  //     }
+  //     return null;
+  //   }
+  //
+  //   this.lastRelation = currentRelation;
+  //   return null;
+  // }
+
   getCurrentRelation(): 'above' | 'below' | null {
     return this.lastRelation;
   }
 
   reset(): void {
     this.lastRelation = null;
+    this.cooldownRemaining = 0;
   }
 }
