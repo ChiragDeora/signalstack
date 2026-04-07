@@ -20,6 +20,7 @@ import {
 } from './brevoEmail';
 import { getClerkUserEmail } from './clerkUserEmail';
 import { buildCrossoverChartAttachment } from './alertChart';
+import { appendAlertLog } from './alertLogger';
 import { CandleData } from './types';
 // marketHours removed — alerts now fire regardless of trading hours
 
@@ -297,6 +298,12 @@ export class CrossoverService {
       }
 
       this.sendPushNotification(alert, userId);
+
+      // Find the candle that produced this alert (for the close price column)
+      const matchedCandle = candleData?.find(
+        (c) => new Date(c.timestamp).toISOString() === alert.timestamp,
+      );
+
       // Chart generation is async (sharp SVG→PNG) — run in parallel with email lookup
       const chartPromise = buildCrossoverChartAttachment(alert, candleData).catch((e) => {
         console.warn('Chart generation failed:', e);
@@ -305,9 +312,23 @@ export class CrossoverService {
       Promise.all([userEmailPromise, chartPromise]).then(([email, chartAttachment]) => {
         const attachments = chartAttachment ? [chartAttachment] : undefined;
         return sendCrossoverAlertEmail(alert, email, attachments);
-      }).catch((e) =>
-        console.warn('Crossover email alert failed:', e),
-      );
+      })
+        .then(() => {
+          // Log to xlsx after the email has been dispatched (best-effort)
+          appendAlertLog(alert, {
+            userId,
+            emailSentAt: Date.now(),
+            candleClosePrice: matchedCandle?.close,
+          }).catch((e) => console.warn('Alert log append failed:', e));
+        })
+        .catch((e) => {
+          console.warn('Crossover email alert failed:', e);
+          // Still log the alert even if email failed
+          appendAlertLog(alert, {
+            userId,
+            candleClosePrice: matchedCandle?.close,
+          }).catch((err) => console.warn('Alert log append failed:', err));
+        });
     }
   }
 

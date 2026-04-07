@@ -15,6 +15,7 @@ import {
   getAllPushSubscriptions,
   removePushSubscription as persistRemovePushSubscription,
 } from './pushSubscriptionPersistence';
+import { initAlertLog } from './alertLogger';
 
 const g = globalThis as unknown as {
   __crossoverService?: CrossoverService | null;
@@ -30,6 +31,8 @@ export async function getOrCreateCrossoverService(): Promise<CrossoverService> {
       onSubscriptionExpired: (endpoint) => persistRemovePushSubscription(endpoint),
     });
     svc.initialize();
+    // Make sure the xlsx alert log file exists before any alert tries to append
+    await initAlertLog();
     const configs = await getAllWatches();
     await svc.restoreAllWatches(configs);
     const subs = await getAllPushSubscriptions();

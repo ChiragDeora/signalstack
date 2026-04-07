@@ -4,7 +4,7 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import {
   Bell, Plus, TrendingUp, TrendingDown,
   Target, Search, Trash2, BarChart3, Zap,
-  ArrowRight, Activity, Power, Wifi, WifiOff, RefreshCw, X, Pencil, Check, Mail,
+  ArrowRight, Activity, Power, Wifi, WifiOff, RefreshCw, X, Pencil, Check, Mail, Download,
 } from 'lucide-react';
 import { UserButton, useUser } from '@clerk/nextjs';
 import axios from 'axios';
@@ -1144,6 +1144,23 @@ export default function EMAAlertSystem() {
                   </span>
                 )}
               </div>
+            )}
+            {userId && (
+              <a
+                href="/api/alert-log"
+                download
+                className="tf-btn flex items-center gap-1.5 !text-xs min-h-[44px] flex-shrink-0"
+                title="Download the crossover alert log (xlsx) for cross-referencing with TradingView"
+                style={{
+                  background: 'var(--blue-bg, rgba(37,99,235,0.08))',
+                  borderColor: 'rgba(37,99,235,0.4)',
+                  color: '#2563eb',
+                  fontWeight: 600,
+                }}
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Alert log</span>
+              </a>
             )}
             {mounted && 'serviceWorker' in navigator && (
               pushAvailable === false ? (
