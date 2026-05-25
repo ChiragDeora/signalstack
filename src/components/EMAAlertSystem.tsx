@@ -586,6 +586,12 @@ export default function EMAAlertSystem() {
     setShowSearch(false);
     setShowSearchMobile(false);
     setSelectedSymbol(result.symbol);
+    if (userId) {
+      axios.post('/api/user/watchlist', { symbol: result.symbol }).catch(() => { });
+      if (isReplace && toReplace) {
+        axios.delete('/api/user/watchlist', { params: { symbol: toReplace } }).catch(() => { });
+      }
+    }
   };
 
   const removeSymbol = async (sym: string) => {
@@ -609,6 +615,9 @@ export default function EMAAlertSystem() {
     setPriceByKey((prev) => { const next = { ...prev }; delete next[key]; return next; });
     setEmaByKey((prev) => { const next = { ...prev }; delete next[key]; return next; });
     setWarmupByKey((prev) => { const next = { ...prev }; delete next[key]; return next; });
+    if (userId) {
+      axios.delete('/api/user/watchlist', { params: { symbol: sym } }).catch(() => { });
+    }
   };
 
   const stopMonitoringForSymbol = async (sym: string) => {
@@ -1149,7 +1158,7 @@ export default function EMAAlertSystem() {
               <a
                 href="/api/alert-log"
                 download
-                className="tf-btn flex items-center gap-1.5 !text-xs min-h-[44px] flex-shrink-0"
+                className="tf-btn hidden sm:flex items-center gap-1.5 !text-xs min-h-[44px] flex-shrink-0"
                 title="Download the crossover alert log (xlsx) for cross-referencing with TradingView"
                 style={{
                   background: 'var(--blue-bg, rgba(37,99,235,0.08))',
@@ -1238,6 +1247,24 @@ export default function EMAAlertSystem() {
             )}
           </div>
         </header>
+
+        {/* Mobile-only: prominent Alert log download button (the one in the wrap-row can get pushed off on narrow screens) */}
+        {userId && (
+          <a
+            href="/api/alert-log"
+            download
+            className="sm:hidden flex items-center justify-center gap-2 w-full mb-3 px-3 py-3 rounded-xl border text-sm font-semibold min-h-[44px]"
+            title="Download the crossover alert log (xlsx)"
+            style={{
+              background: 'var(--blue-bg, rgba(37,99,235,0.08))',
+              borderColor: 'rgba(37,99,235,0.4)',
+              color: '#2563eb',
+            }}
+          >
+            <Download className="w-4 h-4" />
+            <span>Download Alert log (xlsx)</span>
+          </a>
+        )}
 
         {/* ─── MONITORING / STATUS BANNER (compact on mobile) ─── */}
         {(isMonitoring || monitorStatus) && (
