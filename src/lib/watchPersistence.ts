@@ -27,7 +27,7 @@ function parseRsi(raw: unknown): RsiConfig | undefined {
     return undefined;
   }
   const s: Partial<RsiConfig['signals']> = r.signals ?? {};
-  return {
+  const cfg: RsiConfig = {
     enabled: true,
     period: r.period,
     overbought: r.overbought,
@@ -37,8 +37,15 @@ function parseRsi(raw: unknown): RsiConfig | undefined {
       oversoldCross: !!s.oversoldCross,
       thresholdBreach: !!s.thresholdBreach,
       centerlineCross: !!s.centerlineCross,
+      signalLineCross: !!s.signalLineCross,
     },
   };
+  if (s.signalLineCross && typeof (r as { signalLineLength?: number }).signalLineLength === 'number') {
+    cfg.signalLineLength = (r as { signalLineLength: number }).signalLineLength;
+  } else if (s.signalLineCross) {
+    cfg.signalLineLength = 14;
+  }
+  return cfg;
 }
 
 function rowToConfig(row: WatchRow): WatchConfig {

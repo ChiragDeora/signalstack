@@ -27,7 +27,7 @@ function validateRsi(raw: unknown): { rsi?: RsiConfig; error?: string } {
   if (!s || typeof s !== 'object') {
     return { error: 'rsi.signals object is required when rsi.enabled = true' };
   }
-  const flags = ['overboughtCross', 'oversoldCross', 'thresholdBreach', 'centerlineCross'] as const;
+  const flags = ['overboughtCross', 'oversoldCross', 'thresholdBreach', 'centerlineCross', 'signalLineCross'] as const;
   for (const f of flags) {
     if (typeof s[f] !== 'boolean') {
       return { error: `rsi.signals.${f} must be a boolean` };
@@ -37,17 +37,32 @@ function validateRsi(raw: unknown): { rsi?: RsiConfig; error?: string } {
     return { error: 'At least one rsi.signals.* flag must be true when rsi.enabled = true' };
   }
 
+  // signalLineLength is only required (and validated) when signalLineCross is on
+  let signalLineLength: number | undefined;
+  if (s.signalLineCross) {
+    if (typeof r.signalLineLength === 'number' && Number.isFinite(r.signalLineLength)) {
+      if (r.signalLineLength < 2 || r.signalLineLength > 200) {
+        return { error: 'rsi.signalLineLength must be a number between 2 and 200 when signalLineCross is enabled' };
+      }
+      signalLineLength = r.signalLineLength;
+    } else {
+      signalLineLength = 14;
+    }
+  }
+
   return {
     rsi: {
       enabled: true,
       period: r.period,
       overbought: r.overbought,
       oversold: r.oversold,
+      ...(signalLineLength !== undefined ? { signalLineLength } : {}),
       signals: {
         overboughtCross: !!s.overboughtCross,
         oversoldCross: !!s.oversoldCross,
         thresholdBreach: !!s.thresholdBreach,
         centerlineCross: !!s.centerlineCross,
+        signalLineCross: !!s.signalLineCross,
       },
     },
   };
@@ -64,23 +79,39 @@ export async function POST(req: NextRequest) {
     const body = await req.json();
     const { symbol, timeframe, emaPeriods, trackBullish, trackBearish, exchange, currency, rsi } = body;
 
-    if (!symbol || !timeframe || !emaPeriods || emaPeriods.length < 2) {
-      return NextResponse.json(
-        { success: false, error: 'Need symbol, timeframe, and at least 2 EMA periods' },
-        { status: 400 },
-      );
-    }
-
+    const emaAlertsOn = trackBullish !== false || trackBearish !== false;
     const { rsi: rsiConfig, error: rsiError } = validateRsi(rsi);
     if (rsiError) {
       return NextResponse.json({ success: false, error: rsiError }, { status: 400 });
     }
+    const rsiOn = !!rsiConfig?.enabled;
+
+    if (!symbol || !timeframe) {
+      return NextResponse.json(
+        { success: false, error: 'Need symbol and timeframe' },
+        { status: 400 },
+      );
+    }
+    if (!emaAlertsOn && !rsiOn) {
+      return NextResponse.json(
+        { success: false, error: 'Enable EMA crossover alerts, RSI alerts, or both' },
+        { status: 400 },
+      );
+    }
+    if (emaAlertsOn && (!emaPeriods || emaPeriods.length < 2)) {
+      return NextResponse.json(
+        { success: false, error: 'Need at least 2 EMA periods when EMA alerts are enabled' },
+        { status: 400 },
+      );
+    }
+
+    const periods = Array.isArray(emaPeriods) ? emaPeriods.map(Number).filter((n) => Number.isFinite(n)) : [];
 
     const config: WatchConfig = {
       userId,
       symbol: symbol.toUpperCase(),
       timeframe,
-      emaPeriods: emaPeriods.map(Number),
+      emaPeriods: periods,
       trackBullish: trackBullish !== false,
       trackBearish: trackBearish !== false,
       exchange: exchange || 'NSE',

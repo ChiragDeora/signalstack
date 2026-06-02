@@ -54,13 +54,15 @@ export interface RsiAlert {
   type: 'rsi';
   symbol: string;
   timeframe: string;
-  signalType: 'overboughtCross' | 'oversoldCross' | 'thresholdBreach' | 'centerlineCross';
+  signalType: 'overboughtCross' | 'oversoldCross' | 'thresholdBreach' | 'centerlineCross' | 'signalLineCross';
   direction: 'bullish' | 'bearish';
   rsiValue: number;
   previousRsi: number;
   period: number;
   overbought: number;
   oversold: number;
+  /** EMA length of the signal line — included when signalType=signalLineCross. */
+  signalLineLength?: number;
   price: number;
   currency: string;
   timestamp: string;
@@ -90,11 +92,14 @@ export interface RsiConfig {
   period: number;
   overbought: number;
   oversold: number;
+  /** EMA length for the signal line. Only used when signals.signalLineCross is true. */
+  signalLineLength?: number;
   signals: {
     overboughtCross: boolean;
     oversoldCross: boolean;
     thresholdBreach: boolean;
     centerlineCross: boolean;
+    signalLineCross: boolean;
   };
 }
 

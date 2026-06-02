@@ -250,6 +250,7 @@ const RSI_SIGNAL_LABEL: Record<string, string> = {
   oversoldCross: 'Oversold cross',
   thresholdBreach: 'Threshold breach',
   centerlineCross: 'Centerline (50) cross',
+  signalLineCross: 'Signal line cross',
 };
 
 /**
@@ -259,13 +260,14 @@ export async function sendRsiAlertEmail(
   alert: {
     symbol: string;
     timeframe: string;
-    signalType: 'overboughtCross' | 'oversoldCross' | 'thresholdBreach' | 'centerlineCross';
+    signalType: 'overboughtCross' | 'oversoldCross' | 'thresholdBreach' | 'centerlineCross' | 'signalLineCross';
     direction: 'bullish' | 'bearish';
     rsiValue: number;
     previousRsi: number;
     period: number;
     overbought: number;
     oversold: number;
+    signalLineLength?: number;
     price: number;
     currency: string;
     timestamp: string;

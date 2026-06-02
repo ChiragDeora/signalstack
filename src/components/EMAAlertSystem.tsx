@@ -27,6 +27,7 @@ interface RsiSignalFlags {
   oversoldCross: boolean;
   thresholdBreach: boolean;
   centerlineCross: boolean;
+  signalLineCross: boolean;
 }
 
 /** Server-side RSI config (numeric, validated). */
@@ -35,6 +36,7 @@ interface RsiPayload {
   period: number;
   overbought: number;
   oversold: number;
+  signalLineLength?: number;
   signals: RsiSignalFlags;
 }
 
@@ -44,15 +46,41 @@ interface RsiUiConfig {
   period: string;
   overbought: string;
   oversold: string;
+  signalLineLength: string;
   signals: RsiSignalFlags;
 }
 
+const RSI_DEFAULTS = {
+  period: '14',
+  overbought: '70',
+  oversold: '30',
+  signalLineLength: '14',
+};
+
+const DEFAULT_RSI_SIGNALS: RsiSignalFlags = {
+  overboughtCross: false,
+  oversoldCross: false,
+  thresholdBreach: false,
+  centerlineCross: false,
+  signalLineCross: true,
+};
+
+/** Signal line cross first in the alerts list. */
+const RSI_SIGNAL_ORDER: Array<keyof RsiSignalFlags> = [
+  'signalLineCross',
+  'overboughtCross',
+  'oversoldCross',
+  'thresholdBreach',
+  'centerlineCross',
+];
+
 const EMPTY_RSI_UI: RsiUiConfig = {
   enabled: false,
-  period: '',
-  overbought: '',
-  oversold: '',
-  signals: { overboughtCross: false, oversoldCross: false, thresholdBreach: false, centerlineCross: false },
+  period: RSI_DEFAULTS.period,
+  overbought: RSI_DEFAULTS.overbought,
+  oversold: RSI_DEFAULTS.oversold,
+  signalLineLength: RSI_DEFAULTS.signalLineLength,
+  signals: { overboughtCross: false, oversoldCross: false, thresholdBreach: false, centerlineCross: false, signalLineCross: false },
 };
 
 interface RsiLive {
@@ -84,6 +112,7 @@ const RSI_SIGNAL_LABELS: Record<keyof RsiSignalFlags, string> = {
   oversoldCross: 'Oversold cross',
   thresholdBreach: 'Threshold breach',
   centerlineCross: 'Centerline cross',
+  signalLineCross: 'Signal line cross',
 };
 
 /** Verbose labels used only in the configuration form (not the alert list). */
@@ -92,14 +121,15 @@ const RSI_SIGNAL_LABELS_LONG: Record<keyof RsiSignalFlags, string> = {
   oversoldCross: 'Oversold cross (bullish)',
   thresholdBreach: 'Threshold breach',
   centerlineCross: 'Centerline (50) cross',
+  signalLineCross: 'Signal line cross (RSI vs its EMA)',
 };
 
 /** Validate UI inputs and produce the server payload. */
 function buildRsiPayload(ui: RsiUiConfig): { ok: true; rsi?: RsiPayload } | { ok: false; error: string } {
   if (!ui.enabled) return { ok: true };
-  const period = parseInt(ui.period, 10);
-  const overbought = parseFloat(ui.overbought);
-  const oversold = parseFloat(ui.oversold);
+  const period = parseInt(ui.period.trim() || RSI_DEFAULTS.period, 10);
+  const overbought = parseFloat(ui.overbought.trim() || RSI_DEFAULTS.overbought);
+  const oversold = parseFloat(ui.oversold.trim() || RSI_DEFAULTS.oversold);
   if (!Number.isFinite(period) || period < 2 || period > 200) {
     return { ok: false, error: 'RSI period must be a number between 2 and 200' };
   }
@@ -112,7 +142,15 @@ function buildRsiPayload(ui: RsiUiConfig): { ok: true; rsi?: RsiPayload } | { ok
   if (!Object.values(ui.signals).some(Boolean)) {
     return { ok: false, error: 'Pick at least one RSI signal to track' };
   }
-  return { ok: true, rsi: { enabled: true, period, overbought, oversold, signals: ui.signals } };
+  const payload: RsiPayload = { enabled: true, period, overbought, oversold, signals: ui.signals };
+  if (ui.signals.signalLineCross) {
+    const sigLen = parseInt(ui.signalLineLength.trim() || RSI_DEFAULTS.signalLineLength, 10);
+    if (!Number.isFinite(sigLen) || sigLen < 2 || sigLen > 200) {
+      return { ok: false, error: 'Signal line EMA length must be a number between 2 and 200' };
+    }
+    payload.signalLineLength = sigLen;
+  }
+  return { ok: true, rsi: payload };
 }
 
 function rsiPayloadToUi(p: RsiPayload | undefined): RsiUiConfig {
@@ -122,6 +160,7 @@ function rsiPayloadToUi(p: RsiPayload | undefined): RsiUiConfig {
     period: String(p.period),
     overbought: String(p.overbought),
     oversold: String(p.oversold),
+    signalLineLength: p.signalLineLength != null ? String(p.signalLineLength) : RSI_DEFAULTS.signalLineLength,
     signals: { ...p.signals },
   };
 }
@@ -203,6 +242,7 @@ export default function EMAAlertSystem() {
   const [isSearching, setIsSearching] = useState(false);
   const [emasBySymbol, setEmasBySymbol] = useState<Record<string, EMA[]>>({});
   const [rsiBySymbol, setRsiBySymbol] = useState<Record<string, RsiUiConfig>>({});
+  const [emaEnabledBySymbol, setEmaEnabledBySymbol] = useState<Record<string, boolean>>({});
   const [rsiByKey, setRsiByKey] = useState<Record<string, RsiLive>>({});
   const [rsiAlerts, setRsiAlerts] = useState<RsiAlertData[]>([]);
   const [rsiFormError, setRsiFormError] = useState<string | null>(null);
@@ -256,7 +296,13 @@ export default function EMAAlertSystem() {
     [displaySymbol, emasBySymbol]
   );
   const rsiUi = displaySymbol ? (rsiBySymbol[displaySymbol] ?? EMPTY_RSI_UI) : EMPTY_RSI_UI;
+  const emaAlertsEnabled = displaySymbol ? (emaEnabledBySymbol[displaySymbol] ?? true) : true;
   const liveRsi = displaySymbol ? rsiByKey[watchKey(displaySymbol, displayTimeframe)] : undefined;
+
+  const updateEmaEnabled = useCallback((enabled: boolean) => {
+    if (!displaySymbol) return;
+    setEmaEnabledBySymbol((prev) => ({ ...prev, [displaySymbol]: enabled }));
+  }, [displaySymbol]);
 
   const updateRsi = useCallback((updater: (prev: RsiUiConfig) => RsiUiConfig) => {
     if (!displaySymbol) return;
@@ -371,13 +417,18 @@ export default function EMAAlertSystem() {
         if (watches.length === 0) return;
         setMonitorStatus('Restoring monitoring...');
 
-        // Hydrate RSI UI state from persisted watches so the form reflects what's running
+        // Hydrate RSI + EMA alert UI state from persisted watches
         const rsiMap: Record<string, RsiUiConfig> = {};
+        const emaEnabledMap: Record<string, boolean> = {};
         for (const w of watches) {
           if (w.rsi) rsiMap[w.symbol] = rsiPayloadToUi(w.rsi);
+          emaEnabledMap[w.symbol] = w.trackBullish || w.trackBearish;
         }
         if (Object.keys(rsiMap).length > 0) {
           setRsiBySymbol((prev) => ({ ...rsiMap, ...prev }));
+        }
+        if (Object.keys(emaEnabledMap).length > 0) {
+          setEmaEnabledBySymbol((prev) => ({ ...emaEnabledMap, ...prev }));
         }
 
         const restored: string[] = [];
@@ -916,12 +967,18 @@ export default function EMAAlertSystem() {
       return;
     }
     const symbolEmas = emasBySymbol[sym] ?? [];
-    if (symbolEmas.length < 2) {
-      setMonitorStatus(`${sym}: add at least 2 EMAs before starting monitoring.`);
-      return;
-    }
+    const emaOn = emaEnabledBySymbol[sym] ?? true;
     const symRsiUi = rsiBySymbol[sym] ?? EMPTY_RSI_UI;
     const rsiCheck = buildRsiPayload(symRsiUi);
+    const rsiOn = symRsiUi.enabled && rsiCheck.ok && !!rsiCheck.rsi;
+    if (!emaOn && !rsiOn) {
+      setMonitorStatus(`${sym}: enable EMA alerts, RSI alerts, or both.`);
+      return;
+    }
+    if (emaOn && symbolEmas.length < 2) {
+      setMonitorStatus(`${sym}: add at least 2 EMAs for crossover alerts.`);
+      return;
+    }
     if (!rsiCheck.ok) {
       setRsiFormError(rsiCheck.error);
       setMonitorStatus(`${sym}: ${rsiCheck.error}`);
@@ -932,13 +989,14 @@ export default function EMAAlertSystem() {
     const tf = getTimeframe(sym);
     try {
       setMonitoringBusy(true);
-      setMonitorStatus(`Starting ${sym} — loading up to 90 days of history and warming EMAs. This can take 20–30 seconds.`);
+      const alertParts = [emaOn && 'EMA', rsiOn && 'RSI'].filter(Boolean).join(' + ');
+      setMonitorStatus(`Starting ${sym} (${alertParts}) — loading history and warming indicators. This can take 20–30 seconds.`);
       const res = await axios.post('/api/monitor', {
         symbol: s.symbol,
         timeframe: tf,
         emaPeriods: symbolEmas.map((e) => e.period),
-        trackBullish,
-        trackBearish,
+        trackBullish: emaOn ? trackBullish : false,
+        trackBearish: emaOn ? trackBearish : false,
         exchange: s.exchange || 'NSE',
         currency: s.currency,
         rsi: rsiCheck.rsi,
@@ -1905,20 +1963,34 @@ export default function EMAAlertSystem() {
           {/* ─── LEFT: EMA Config (collapsible on mobile) ─── */}
           <div className="lg:col-span-5">
             <div className="card !p-3 sm:!p-5">
-              <button
-                type="button"
-                onClick={() => setShowEmaConfig(!showEmaConfig)}
-                className="lg:pointer-events-none w-full flex items-center justify-between gap-2 min-w-0"
-              >
-                <div className="section-label flex items-center gap-2 min-w-0">
-                  <BarChart3 className="w-4 h-4 flex-shrink-0" style={{ color: 'var(--accent)' }} />
-                  <span className="truncate">EMA Periods {displaySymbol && <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>({displaySymbol})</span>}</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="badge flex-shrink-0" style={{ background: 'rgba(14,165,233,0.08)', color: 'var(--accent)' }}>{emas.length}</span>
-                  <span className="lg:hidden text-xs" style={{ color: 'var(--text-muted)' }}>{showEmaConfig ? '▲' : '▼'}</span>
-                </div>
-              </button>
+              <div className="flex items-center justify-between gap-2 min-w-0 mb-3 lg:mb-0">
+                <button
+                  type="button"
+                  onClick={() => setShowEmaConfig(!showEmaConfig)}
+                  className="lg:pointer-events-none flex items-center justify-between gap-2 min-w-0 flex-1"
+                >
+                  <div className="section-label flex items-center gap-2 min-w-0">
+                    <BarChart3 className="w-4 h-4 flex-shrink-0" style={{ color: 'var(--accent)' }} />
+                    <span className="truncate">EMA Periods {displaySymbol && <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>({displaySymbol})</span>}</span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="badge flex-shrink-0" style={{ background: 'rgba(14,165,233,0.08)', color: 'var(--accent)' }}>{emas.length}</span>
+                    <span className="lg:hidden text-xs" style={{ color: 'var(--text-muted)' }}>{showEmaConfig ? '▲' : '▼'}</span>
+                  </div>
+                </button>
+                <label className="inline-flex items-center gap-2 cursor-pointer select-none flex-shrink-0" title="Enable EMA crossover alerts for this symbol">
+                  <input
+                    type="checkbox"
+                    className="w-4 h-4"
+                    checked={emaAlertsEnabled}
+                    disabled={!displaySymbol}
+                    onChange={(e) => updateEmaEnabled(e.target.checked)}
+                  />
+                  <span className="text-xs font-semibold" style={{ color: 'var(--text-secondary)' }}>
+                    {emaAlertsEnabled ? 'Enabled' : 'Off'}
+                  </span>
+                </label>
+              </div>
 
               <div className={`${showEmaConfig ? '' : 'hidden lg:block'} mt-4`}>
 
@@ -1961,8 +2033,12 @@ export default function EMAAlertSystem() {
                 ) : emas.length === 0 ? (
                   <div className="text-center py-6" style={{ color: 'var(--text-muted)' }}>
                     <BarChart3 className="w-8 h-8 mx-auto mb-2 opacity-30" />
-                    <p className="text-sm font-medium">Add at least 2 EMAs for {displaySymbol}</p>
-                    <p className="text-xs mt-1 opacity-60">to start monitoring crossovers</p>
+                    <p className="text-sm font-medium">
+                      {emaAlertsEnabled ? `Add at least 2 EMAs for ${displaySymbol}` : `Optional: add EMAs for ${displaySymbol}`}
+                    </p>
+                    <p className="text-xs mt-1 opacity-60">
+                      {emaAlertsEnabled ? 'to start monitoring crossovers' : 'or enable RSI-only alerts below'}
+                    </p>
                   </div>
                 ) : (
                   <div className="space-y-2 mb-4">
@@ -1996,6 +2072,13 @@ export default function EMAAlertSystem() {
 
                 <div className="h-px my-4" style={{ background: 'var(--border-subtle)' }} />
 
+                {!emaAlertsEnabled ? (
+                  <p className="text-xs leading-relaxed mb-4" style={{ color: 'var(--text-muted)' }}>
+                    EMA crossover alerts are off. Enable above to alert on bullish/bearish EMA crosses,
+                    or use RSI-only monitoring below.
+                  </p>
+                ) : (
+                  <>
                 {/* Monitoring Controls — which crossovers to alert on */}
                 <div className="flex gap-2 mb-4">
                   <button
@@ -2025,6 +2108,8 @@ export default function EMAAlertSystem() {
                     <span>Bearish</span>
                   </button>
                 </div>
+                  </>
+                )}
 
                 <button
                   onClick={() => {
@@ -2038,11 +2123,6 @@ export default function EMAAlertSystem() {
                     }
                     if (!displaySymbol) {
                       setMonitorStatus('Add at least one symbol to start monitoring.');
-                      return;
-                    }
-                    const count = (emasBySymbol[displaySymbol] ?? []).length;
-                    if (count < 2 && !monitoredSymbols.has(displaySymbol)) {
-                      setMonitorStatus(`${displaySymbol}: add at least 2 EMAs before starting monitoring.`);
                       return;
                     }
                     if (monitoredSymbols.has(displaySymbol)) {
@@ -2079,7 +2159,18 @@ export default function EMAAlertSystem() {
                     className="w-4 h-4"
                     checked={rsiUi.enabled}
                     disabled={!displaySymbol}
-                    onChange={(e) => updateRsi((prev) => ({ ...prev, enabled: e.target.checked }))}
+                    onChange={(e) => updateRsi((prev) => {
+                      const enabling = e.target.checked;
+                      return {
+                        ...prev,
+                        enabled: enabling,
+                        period: prev.period || RSI_DEFAULTS.period,
+                        overbought: prev.overbought || RSI_DEFAULTS.overbought,
+                        oversold: prev.oversold || RSI_DEFAULTS.oversold,
+                        signalLineLength: RSI_DEFAULTS.signalLineLength,
+                        ...(enabling ? { signals: { ...DEFAULT_RSI_SIGNALS } } : {}),
+                      };
+                    })}
                   />
                   <span className="text-xs font-semibold" style={{ color: 'var(--text-secondary)' }}>
                     {rsiUi.enabled ? 'Enabled' : 'Off'}
@@ -2136,7 +2227,6 @@ export default function EMAAlertSystem() {
                         value={rsiUi.period}
                         onChange={(e) => updateRsi((prev) => ({ ...prev, period: e.target.value }))}
                         className="input-field text-sm !py-2"
-                        placeholder="e.g. 14"
                       />
                     </label>
                     <label className="flex flex-col gap-1">
@@ -2150,7 +2240,6 @@ export default function EMAAlertSystem() {
                         value={rsiUi.overbought}
                         onChange={(e) => updateRsi((prev) => ({ ...prev, overbought: e.target.value }))}
                         className="input-field text-sm !py-2"
-                        placeholder="e.g. 70"
                       />
                     </label>
                     <label className="flex flex-col gap-1">
@@ -2164,7 +2253,6 @@ export default function EMAAlertSystem() {
                         value={rsiUi.oversold}
                         onChange={(e) => updateRsi((prev) => ({ ...prev, oversold: e.target.value }))}
                         className="input-field text-sm !py-2"
-                        placeholder="e.g. 30"
                       />
                     </label>
                   </div>
@@ -2175,24 +2263,41 @@ export default function EMAAlertSystem() {
                       Alerts to fire
                     </div>
                     <div className="space-y-1.5">
-                      {(Object.keys(RSI_SIGNAL_LABELS_LONG) as Array<keyof RsiSignalFlags>).map((key) => (
-                        <label key={key} className="flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer"
-                          style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}>
-                          <input
-                            type="checkbox"
-                            className="w-4 h-4"
-                            checked={rsiUi.signals[key]}
-                            onChange={(e) =>
-                              updateRsi((prev) => ({
-                                ...prev,
-                                signals: { ...prev.signals, [key]: e.target.checked },
-                              }))
-                            }
-                          />
-                          <span className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>
-                            {RSI_SIGNAL_LABELS_LONG[key]}
-                          </span>
-                        </label>
+                      {RSI_SIGNAL_ORDER.map((key) => (
+                        <div key={key}>
+                          <label className="flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer"
+                            style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}>
+                            <input
+                              type="checkbox"
+                              className="w-4 h-4"
+                              checked={rsiUi.signals[key]}
+                              onChange={(e) =>
+                                updateRsi((prev) => ({
+                                  ...prev,
+                                  signals: { ...prev.signals, [key]: e.target.checked },
+                                }))
+                              }
+                            />
+                            <span className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>
+                              {RSI_SIGNAL_LABELS_LONG[key]}
+                            </span>
+                          </label>
+                          {key === 'signalLineCross' && rsiUi.signals.signalLineCross && (
+                            <label className="flex items-center gap-2 mt-1.5 ml-6 mr-3">
+                              <span className="text-[11px] font-semibold" style={{ color: 'var(--text-muted)' }}>
+                                EMA length
+                              </span>
+                              <input
+                                type="number"
+                                min="2"
+                                max="200"
+                                value={rsiUi.signalLineLength}
+                                onChange={(e) => updateRsi((prev) => ({ ...prev, signalLineLength: e.target.value }))}
+                                className="input-field text-sm !py-1.5 !px-2 w-20"
+                              />
+                            </label>
+                          )}
+                        </div>
                       ))}
                     </div>
                   </div>

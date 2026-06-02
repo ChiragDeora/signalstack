@@ -90,6 +90,8 @@ export class EMAEngine {
         oversoldCross: config.rsi.signals.oversoldCross,
         thresholdBreach: config.rsi.signals.thresholdBreach,
         centerlineCross: config.rsi.signals.centerlineCross,
+        signalLineCross: config.rsi.signals.signalLineCross,
+        signalLineLength: config.rsi.signalLineLength ?? 14,
       });
     }
 
@@ -167,11 +169,19 @@ export class EMAEngine {
       }
     }
 
-    // Feed warmup closes into RSI (if enabled) and seed its zone state
+    // Feed warmup closes into RSI (if enabled) and seed its zone + signal-line state
     if (state.rsi && state.rsiDetector) {
+      // Compute the RSI series for warmup so the signal-line EMA can also be seeded
+      const rsiSeries: number[] = [];
+      const tmp = new RSICalculator(state.rsi.getPeriod());
+      for (const close of closePrices) {
+        const v = tmp.update(close);
+        if (v !== null) rsiSeries.push(v);
+      }
       state.rsi.bulkLoad(closePrices);
       const rsiVal = state.rsi.getValue();
       if (rsiVal !== null) state.rsiDetector.initFromValue(rsiVal);
+      state.rsiDetector.warmupSignalLine(rsiSeries);
     }
 
     // Initialize crossover detectors with current EMA relations
@@ -187,12 +197,14 @@ export class EMAEngine {
     }
 
     state.lastPrice = closePrices[closePrices.length - 1];
-    state.isWarmedUp = state.emas.size > 0;
+    state.isWarmedUp = state.emas.size > 0 || !!(state.rsi?.isReady());
     state.lastProcessedCandleTs = closedCandles[closedCandles.length - 1].timestamp;
 
-    const allReady = [...state.emas.values()].every((c) => c.isReady());
+    const allReady = state.emas.size === 0
+      ? !!(state.rsi?.isReady())
+      : [...state.emas.values()].every((c) => c.isReady());
     console.log(
-      `📊 EMA Engine: warmup complete for ${symbol} (${timeframe}) — ${closePrices.length} closed candles, all EMAs ready: ${allReady}`
+      `📊 EMA Engine: warmup complete for ${symbol} (${timeframe}) — ${closePrices.length} closed candles, ready: ${allReady}`
     );
   }
 
@@ -331,11 +343,18 @@ export class EMAEngine {
           calc.bulkLoad(historyCloses);
         }
 
-        // Seed RSI silently too
+        // Seed RSI silently too (including the signal-line EMA from RSI series)
         if (state.rsi && state.rsiDetector) {
+          const rsiSeries: number[] = [];
+          const tmp = new RSICalculator(state.rsi.getPeriod());
+          for (const close of historyCloses) {
+            const v = tmp.update(close);
+            if (v !== null) rsiSeries.push(v);
+          }
           state.rsi.bulkLoad(historyCloses);
           const rsiVal = state.rsi.getValue();
           if (rsiVal !== null) state.rsiDetector.initFromValue(rsiVal);
+          state.rsiDetector.warmupSignalLine(rsiSeries);
         }
 
         // Seed detector lastRelation from EMA state after history replay
@@ -348,7 +367,7 @@ export class EMAEngine {
         }
 
         state.lastProcessedCandleTs = historyCandles[historyCandles.length - 1].timestamp;
-        state.isWarmedUp = state.emas.size > 0;
+        state.isWarmedUp = state.emas.size > 0 || !!(state.rsi?.isReady());
       }
 
       if (liveCandles.length > 0) {
@@ -400,6 +419,9 @@ export class EMAEngine {
               timestamp: candleIso,
               source,
             };
+            if (sig.signalType === 'signalLineCross' && state.config.rsi.signalLineLength) {
+              rsiAlert.signalLineLength = state.config.rsi.signalLineLength;
+            }
             rsiAlerts.push(rsiAlert);
             console.log(
               `🚨 RSI ${sig.signalType} (${sig.direction.toUpperCase()}) on ${symbol} — RSI=${rsiAlert.rsiValue} (prev ${rsiAlert.previousRsi}) at ₹${rsiAlert.price}`,

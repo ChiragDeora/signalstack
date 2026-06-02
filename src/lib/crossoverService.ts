@@ -99,9 +99,17 @@ export class CrossoverService {
   async startMonitoring(config: WatchConfig): Promise<{ success: boolean; message: string }> {
     const key = watchJobKey(config);
 
-    // Validate
-    if (!config.symbol || config.emaPeriods.length < 2) {
-      return { success: false, message: 'Need a symbol and at least 2 EMA periods' };
+    // Validate — need EMA alerts and/or RSI
+    const emaAlertsOn = config.trackBullish || config.trackBearish;
+    const rsiOn = config.rsi?.enabled === true;
+    if (!config.symbol) {
+      return { success: false, message: 'Need a symbol' };
+    }
+    if (!emaAlertsOn && !rsiOn) {
+      return { success: false, message: 'Enable EMA crossover alerts, RSI alerts, or both' };
+    }
+    if (emaAlertsOn && config.emaPeriods.length < 2) {
+      return { success: false, message: 'Need at least 2 EMA periods when EMA alerts are enabled' };
     }
 
     // Per-user limit to segregate API poll load
@@ -538,6 +546,7 @@ export class CrossoverService {
       oversoldCross: 'Oversold cross',
       thresholdBreach: 'Threshold breach',
       centerlineCross: 'Centerline (50) cross',
+      signalLineCross: 'Signal line cross',
     };
     const label = labelMap[alert.signalType];
 

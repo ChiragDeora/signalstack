@@ -9,6 +9,9 @@
     "clean": "rm -rf .next && rm -rf node_modules/.cache",
     "lint": "next lint"
   },
+  "engines": {
+    "node": "22.x"
+  },
   "dependencies": {
     "@clerk/nextjs": "^7.0.1",
     "@supabase/supabase-js": "^2.98.0",

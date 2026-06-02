@@ -133,7 +133,8 @@ export type RsiSignalType =
   | 'overboughtCross'   // crossed back below overbought → bearish
   | 'oversoldCross'     // crossed back above oversold → bullish
   | 'thresholdBreach'   // entered overbought zone (bearish warn) or oversold zone (bullish warn)
-  | 'centerlineCross';  // crossed above 50 (bullish) or below 50 (bearish)
+  | 'centerlineCross'   // crossed above 50 (bullish) or below 50 (bearish)
+  | 'signalLineCross';  // crossed above its EMA smoothing (bullish) or below (bearish)
 
 export interface RsiSignalResult {
   symbol: string;
@@ -152,6 +153,9 @@ export interface RsiSignalConfig {
   oversoldCross: boolean;
   thresholdBreach: boolean;
   centerlineCross: boolean;
+  signalLineCross: boolean;
+  /** EMA period for the signal line (only used when signalLineCross is true). */
+  signalLineLength: number;
 }
 
 export class RSISignalDetector {
@@ -160,6 +164,15 @@ export class RSISignalDetector {
   private inOverboughtZone = false;
   private inOversoldZone = false;
 
+  // Signal-line state — EMA smoothing of the RSI value (matches Pine's `ta.ema(rsi, len)`)
+  private signalLineMultiplier = 0;
+  private signalLineEma: number | null = null;
+  private signalLineSeed: number[] = []; // seeds the EMA via SMA of first N values
+  private signalLineInitialized = false;
+  private prevSignalLine: number | null = null;
+  /** Relation of RSI vs signal line at last observed candle ('above' | 'below'). */
+  private lastSignalRelation: 'above' | 'below' | null = null;
+
   constructor(cfg: RsiSignalConfig) {
     if (cfg.overbought <= 50 || cfg.overbought > 100) {
       throw new Error(`RSISignalDetector: overbought must be in (50, 100] (got ${cfg.overbought})`);
@@ -167,7 +180,35 @@ export class RSISignalDetector {
     if (cfg.oversold >= 50 || cfg.oversold < 0) {
       throw new Error(`RSISignalDetector: oversold must be in [0, 50) (got ${cfg.oversold})`);
     }
+    if (cfg.signalLineCross) {
+      if (!Number.isFinite(cfg.signalLineLength) || cfg.signalLineLength < 2 || cfg.signalLineLength > 200) {
+        throw new Error(`RSISignalDetector: signalLineLength must be 2-200 (got ${cfg.signalLineLength})`);
+      }
+      this.signalLineMultiplier = 2 / (cfg.signalLineLength + 1);
+    }
     this.cfg = cfg;
+  }
+
+  /** Update the EMA-on-RSI smoothing. Returns current smoothed value, or null if still warming up. */
+  private updateSignalLine(rsi: number): number | null {
+    if (!this.cfg.signalLineCross) return null;
+
+    if (!this.signalLineInitialized) {
+      this.signalLineSeed.push(rsi);
+      if (this.signalLineSeed.length >= this.cfg.signalLineLength) {
+        // Seed with SMA of first N RSI values (matches the EMACalculator approach)
+        const sum = this.signalLineSeed.reduce((a, b) => a + b, 0);
+        this.signalLineEma = sum / this.cfg.signalLineLength;
+        this.signalLineInitialized = true;
+        this.signalLineSeed = [];
+      }
+      return this.signalLineEma;
+    }
+
+    if (this.signalLineEma !== null) {
+      this.signalLineEma = rsi * this.signalLineMultiplier + this.signalLineEma * (1 - this.signalLineMultiplier);
+    }
+    return this.signalLineEma;
   }
 
   /**
@@ -179,6 +220,27 @@ export class RSISignalDetector {
     this.prevRsi = rsi;
     this.inOverboughtZone = rsi >= this.cfg.overbought;
     this.inOversoldZone = rsi <= this.cfg.oversold;
+  }
+
+  /**
+   * Bulk-load historical RSI values during warmup so the signal-line EMA is
+   * seeded silently and the first live candle has a valid relation baseline.
+   * No alerts are emitted.
+   */
+  warmupSignalLine(historicalRsi: number[]): void {
+    if (!this.cfg.signalLineCross) return;
+    for (const r of historicalRsi) {
+      if (!Number.isFinite(r)) continue;
+      const sl = this.updateSignalLine(r);
+      if (sl !== null) {
+        this.prevSignalLine = sl;
+        this.lastSignalRelation = r >= sl ? 'above' : 'below';
+      }
+    }
+  }
+
+  getSignalLine(): number | null {
+    return this.signalLineEma;
   }
 
   /**
@@ -252,6 +314,28 @@ export class RSISignalDetector {
       }
     }
 
+    // signalLineCross: RSI vs its own EMA smoothing. Matches Pine's
+    // ta.crossover(rsi, ta.ema(rsi, len)) / ta.crossunder(...).
+    if (this.cfg.signalLineCross) {
+      const signalLine = this.updateSignalLine(rsi);
+      if (signalLine !== null) {
+        const currentRelation: 'above' | 'below' = rsi >= signalLine ? 'above' : 'below';
+        if (this.lastSignalRelation !== null && this.lastSignalRelation !== currentRelation) {
+          signals.push({
+            symbol,
+            signalType: 'signalLineCross',
+            direction: currentRelation === 'above' ? 'bullish' : 'bearish',
+            rsiValue: rsi,
+            previousRsi: prev ?? rsi,
+            price,
+            timestamp: ts,
+          });
+        }
+        this.lastSignalRelation = currentRelation;
+        this.prevSignalLine = signalLine;
+      }
+    }
+
     this.inOverboughtZone = rsi >= this.cfg.overbought;
     this.inOversoldZone = rsi <= this.cfg.oversold;
     this.prevRsi = rsi;
@@ -267,5 +351,10 @@ export class RSISignalDetector {
     this.prevRsi = null;
     this.inOverboughtZone = false;
     this.inOversoldZone = false;
+    this.signalLineEma = null;
+    this.signalLineSeed = [];
+    this.signalLineInitialized = false;
+    this.prevSignalLine = null;
+    this.lastSignalRelation = null;
   }
 }
