@@ -132,12 +132,15 @@ export class CrossoverDetector {
   // private cooldownRemaining: number = 0;
 
   // ================================================================
-  // ACTIVE: Dead zone approach (original, proven working)
-  //   - Holds previous state when EMAs are within 0.05% of each other
-  //   - Causes crossover to fire 1 candle late (2 candle total delay)
-  //   - But reliably catches every legitimate crossover
+  // ACTIVE: Dead zone approach
+  //   - Holds previous state when EMAs are within DEAD_ZONE_PCT of each
+  //     other to prevent flicker on tight EMA spreads.
+  //   - Tightened from 0.05% → 0.02% on candle-close-only pipeline:
+  //     since we no longer feed live ticks, intra-candle flicker is not a
+  //     concern and the wider band was suppressing legitimate close
+  //     crossovers in tight markets.
   // ================================================================
-  private static readonly DEAD_ZONE_PCT = 0.0005;
+  private static readonly DEAD_ZONE_PCT = 0.0002;
 
   constructor(
     ema1Period: number,

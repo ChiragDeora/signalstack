@@ -244,3 +244,62 @@ export async function sendCrossoverAlertEmail(
   const result = await sendEmail({ to: recipients, subject, text, html, attachments });
   if (!result.ok) console.warn('Brevo crossover alert email failed:', result.error);
 }
+
+const RSI_SIGNAL_LABEL: Record<string, string> = {
+  overboughtCross: 'Overbought cross',
+  oversoldCross: 'Oversold cross',
+  thresholdBreach: 'Threshold breach',
+  centerlineCross: 'Centerline (50) cross',
+};
+
+/**
+ * Send RSI alert emails.
+ */
+export async function sendRsiAlertEmail(
+  alert: {
+    symbol: string;
+    timeframe: string;
+    signalType: 'overboughtCross' | 'oversoldCross' | 'thresholdBreach' | 'centerlineCross';
+    direction: 'bullish' | 'bearish';
+    rsiValue: number;
+    previousRsi: number;
+    period: number;
+    overbought: number;
+    oversold: number;
+    price: number;
+    currency: string;
+    timestamp: string;
+  },
+  userEmail?: string | null,
+): Promise<void> {
+  const envRecipients = getAlertRecipientEmails();
+  const recipients = [...envRecipients];
+  if (userEmail && !recipients.includes(userEmail.toLowerCase())) {
+    recipients.push(userEmail.toLowerCase());
+  }
+  if (recipients.length === 0) return;
+  if (!isBrevoConfigured()) return;
+
+  const timeStr = formatAlertTimestamp(alert.timestamp);
+  const emoji = alert.direction === 'bullish' ? '📈' : '📉';
+  const signalLabel = RSI_SIGNAL_LABEL[alert.signalType] ?? alert.signalType;
+  const subject = `${emoji} RSI ${signalLabel}: ${alert.symbol} (${alert.timeframe})`;
+  const text =
+    `RSI ${signalLabel} (${alert.direction}) detected.\n` +
+    `Symbol: ${alert.symbol}\n` +
+    `Timeframe: ${alert.timeframe}\n` +
+    `RSI(${alert.period}) = ${alert.rsiValue.toFixed(2)} (previous ${alert.previousRsi.toFixed(2)})\n` +
+    `Thresholds: overbought ${alert.overbought} / oversold ${alert.oversold}\n` +
+    `Price: ${alert.currency} ${alert.price}\n` +
+    `Time: ${timeStr}`;
+  const html =
+    `<p><strong>RSI ${signalLabel}</strong> (${alert.direction})</p>` +
+    `<p>Symbol: <strong>${alert.symbol}</strong> · Timeframe: ${alert.timeframe}</p>` +
+    `<p>RSI(${alert.period}) = <strong>${alert.rsiValue.toFixed(2)}</strong> (previous ${alert.previousRsi.toFixed(2)})</p>` +
+    `<p>Thresholds — overbought ${alert.overbought}, oversold ${alert.oversold}</p>` +
+    `<p>Price at signal: ${alert.currency} ${alert.price}</p>` +
+    `<p><small>${timeStr}</small></p>`;
+
+  const result = await sendEmail({ to: recipients, subject, text, html });
+  if (!result.ok) console.warn('Brevo RSI alert email failed:', result.error);
+}

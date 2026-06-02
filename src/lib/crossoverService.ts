@@ -10,11 +10,12 @@ import { EMAEngine } from './emaEngine';
 import { UniversalMarketDataSource } from './dynamicMarketSource';
 import { addAlert, getAlerts } from './alertStore';
 import {
-  WatchConfig, CrossoverAlert, PriceUpdate, EmaUpdate,
+  WatchConfig, CrossoverAlert, RsiAlert, PriceUpdate, EmaUpdate,
   MonitorStatus, PushSubscriptionData,
 } from './types';
 import {
   sendCrossoverAlertEmail,
+  sendRsiAlertEmail,
   isBrevoConfigured,
   getAlertRecipientEmails,
 } from './brevoEmail';
@@ -22,6 +23,7 @@ import { getClerkUserEmail } from './clerkUserEmail';
 import { buildCrossoverChartAttachment } from './alertChart';
 import { appendAlertLog } from './alertLogger';
 import { CandleData } from './types';
+import { removeWatch as removeWatchFromDb } from './watchPersistence';
 // marketHours removed — alerts now fire regardless of trading hours
 
 // web-push is optional — only needed for push notifications (see OpenReplay Web Push guide)
@@ -70,6 +72,12 @@ export class CrossoverService {
   private initialized = false;
   /** Per-EMA-pair, per-candle de-duplication: key = userId|symbol|timeframe|fast|slow|type, value = last alert timestamp */
   private lastAlertByPairAndCandle: Map<string, string> = new Map();
+  /** Per-RSI-signal, per-candle de-duplication: key = userId|symbol|timeframe|signalType|direction, value = last alert timestamp */
+  private lastRsiAlertByKey: Map<string, string> = new Map();
+  /** Consecutive null/empty-data poll responses per watch — drives auto-disable for dead symbols. */
+  private nullPollStreak: Map<string, number> = new Map();
+  /** After this many consecutive empty responses, stop polling (likely expired/delisted symbol). */
+  private static readonly DEAD_SYMBOL_THRESHOLD = 5;
 
   constructor(io: any, options?: { onSubscriptionExpired?: OnSubscriptionExpired }) {
     this.io = io;
@@ -220,6 +228,19 @@ export class CrossoverService {
     }
 
     this.engine.removeWatch(symbol, timeframe, userId);
+
+    // Clear any auto-disable streak counters for keys matching this stop scope
+    const upper = symbol.toUpperCase();
+    for (const key of [...this.nullPollStreak.keys()]) {
+      if (userId) {
+        if (timeframe && key === `${userId}:${upper}:${timeframe}`) this.nullPollStreak.delete(key);
+        else if (!timeframe && key.startsWith(`${userId}:${upper}:`)) this.nullPollStreak.delete(key);
+      } else {
+        if (timeframe && key === `${upper}:${timeframe}`) this.nullPollStreak.delete(key);
+        else if (!timeframe && key.startsWith(`${upper}:`)) this.nullPollStreak.delete(key);
+      }
+    }
+
     this.emitStatus(symbol, timeframe || '', 'stopped', 'Monitoring stopped', userId);
     console.log(`🛑 Stopped monitoring ${symbol}${timeframe ? ` (${timeframe})` : ''}${userId ? ' [user]' : ''}`);
   }
@@ -234,16 +255,45 @@ export class CrossoverService {
    * that diverged from the chart and triggering false crossover alerts.
    */
   private async pollAndProcess(config: WatchConfig): Promise<void> {
+    const watchKey = watchJobKey(config);
     try {
       const priceData = await this.dataSource.fetchTimeframeData(config.symbol, config.timeframe, (config.exchange as 'NSE' | 'NFO' | 'BSE') || 'NSE');
-      if (!priceData) return;
+      if (!priceData) {
+        // Track consecutive empty responses. If this symbol consistently returns
+        // nothing, it's likely expired/delisted — stop polling to free up the
+        // Angel One rate-limit budget.
+        const streak = (this.nullPollStreak.get(watchKey) ?? 0) + 1;
+        this.nullPollStreak.set(watchKey, streak);
+        if (streak >= CrossoverService.DEAD_SYMBOL_THRESHOLD) {
+          console.warn(
+            `🛑 Auto-disabling watch ${config.symbol} (${config.timeframe}): ${streak} consecutive empty responses (likely expired/delisted)`,
+          );
+          this.emitStatus(
+            config.symbol,
+            config.timeframe,
+            'error',
+            'No data from data source — auto-stopped and removed. Symbol may be expired or delisted.',
+            config.userId,
+          );
+          await this.stopMonitoring(config.symbol, config.timeframe, config.userId);
+          // Also remove from Supabase so it doesn't come back on next server restart
+          if (config.userId) {
+            await removeWatchFromDb(config.userId, config.symbol, config.timeframe).catch((e) =>
+              console.warn(`Failed to delete dead watch ${config.symbol} from DB:`, e?.message),
+            );
+          }
+        }
+        return;
+      }
+      // Got data — reset the streak
+      this.nullPollStreak.delete(watchKey);
 
       // Emit price update for UI display
       this.emitPriceUpdate(config.symbol, config.timeframe, priceData, config.userId);
 
       // Process only newly-closed candles through the EMA engine.
       // The live LTP is passed for display only — it is NOT fed into the EMAs.
-      const alerts = this.engine.processNewCandles(
+      const { crossovers, rsi } = this.engine.processNewCandles(
         config.symbol,
         config.timeframe,
         priceData.candleData || [],
@@ -253,11 +303,14 @@ export class CrossoverService {
         config.userId,
       );
 
-      // Emit EMA update
+      // Emit EMA update (now also carries RSI value if enabled)
       this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
 
-      // Handle crossover alerts
-      this.handleAlerts(alerts, config.userId, config.exchange, priceData.candleData);
+      // Handle alerts (crossover + RSI)
+      this.handleAlerts(crossovers, config.userId, config.exchange, priceData.candleData);
+      if (rsi.length > 0) {
+        this.handleRsiAlerts(rsi, config.userId);
+      }
     } catch (error) {
       console.error(`❌ Poll error for ${config.symbol}:`, error);
     }
@@ -333,6 +386,43 @@ export class CrossoverService {
   }
 
   /**
+   * Dispatch RSI alerts: dedupe per candle, broadcast over socket, push, email, log.
+   * No DB persistence yet — RSI history will not survive a refresh in this first pass.
+   */
+  private handleRsiAlerts(alerts: RsiAlert[], userId?: string): void {
+    const userEmailPromise =
+      userId && alerts.length > 0 ? getClerkUserEmail(userId) : Promise.resolve(null);
+
+    for (const alert of alerts) {
+      const dedupKey = [
+        userId ?? 'global',
+        alert.symbol.toUpperCase(),
+        alert.timeframe,
+        alert.signalType,
+        alert.direction,
+      ].join('|');
+      const lastTs = this.lastRsiAlertByKey.get(dedupKey);
+      if (lastTs && lastTs === alert.timestamp) continue;
+      this.lastRsiAlertByKey.set(dedupKey, alert.timestamp);
+
+      // Socket broadcast
+      if (userId && this.io) {
+        this.io.to(`user:${userId}`).emit('alert:rsi', alert);
+      } else {
+        this.io?.emit('alert:rsi', alert);
+      }
+
+      // Push notification
+      this.sendRsiPushNotification(alert, userId);
+
+      // Email + xlsx log (best-effort)
+      userEmailPromise
+        .then((email) => sendRsiAlertEmail(alert, email))
+        .catch((e) => console.warn('RSI email alert failed:', e));
+    }
+  }
+
+  /**
    * Emit price update via Socket.IO (to user room if userId set)
    */
   private emitPriceUpdate(symbol: string, timeframe: string, priceData: any, userId?: string): void {
@@ -365,6 +455,7 @@ export class CrossoverService {
         emas: status.emas,
         warmupProgress: status.warmupProgress,
       };
+      if (status.rsi) payload.rsi = status.rsi;
       if (userId && this.io) {
         this.io.to(`user:${userId}`).emit('ema:update', payload);
       } else {
@@ -430,6 +521,45 @@ export class CrossoverService {
         if (err.statusCode === 410 || err.statusCode === 404) {
           this.pushSubscriptions.delete(endpoint);
           console.log(`🔔 Removed expired push subscription`);
+          await this.onSubscriptionExpired?.(endpoint);
+        }
+      }
+    });
+
+    await Promise.allSettled(promises);
+  }
+
+  private async sendRsiPushNotification(alert: RsiAlert, userId?: string): Promise<void> {
+    if (!webpush || this.pushSubscriptions.size === 0) return;
+
+    const emoji = alert.direction === 'bullish' ? '📈' : '📉';
+    const labelMap: Record<RsiAlert['signalType'], string> = {
+      overboughtCross: 'Overbought cross',
+      oversoldCross: 'Oversold cross',
+      thresholdBreach: 'Threshold breach',
+      centerlineCross: 'Centerline (50) cross',
+    };
+    const label = labelMap[alert.signalType];
+
+    const payload = JSON.stringify({
+      title: `${emoji} RSI ${label}: ${alert.symbol}`,
+      body: `RSI(${alert.period}) = ${alert.rsiValue} (${alert.direction}) at ₹${alert.price}`,
+      tag: `rsi-${alert.symbol}-${alert.id}`,
+      url: '/',
+    });
+
+    const options = { TTL: 86400, urgency: 'high' as const };
+    const targets = [...this.pushSubscriptions.entries()].filter(([, sub]) => {
+      if (!userId) return true;
+      if (!sub.userId) return true;
+      return sub.userId === userId;
+    });
+    const promises = targets.map(async ([endpoint, sub]) => {
+      try {
+        await webpush.sendNotification(sub, payload, options);
+      } catch (err: any) {
+        if (err.statusCode === 410 || err.statusCode === 404) {
+          this.pushSubscriptions.delete(endpoint);
           await this.onSubscriptionExpired?.(endpoint);
         }
       }

@@ -48,6 +48,25 @@ export interface SearchResult {
   type: string;
 }
 
+// RSI alert stored and pushed to clients
+export interface RsiAlert {
+  id: string;
+  type: 'rsi';
+  symbol: string;
+  timeframe: string;
+  signalType: 'overboughtCross' | 'oversoldCross' | 'thresholdBreach' | 'centerlineCross';
+  direction: 'bullish' | 'bearish';
+  rsiValue: number;
+  previousRsi: number;
+  period: number;
+  overbought: number;
+  oversold: number;
+  price: number;
+  currency: string;
+  timestamp: string;
+  source: string;
+}
+
 // Crossover alert stored and pushed to clients
 export interface CrossoverAlert {
   id: string;
@@ -64,6 +83,21 @@ export interface CrossoverAlert {
   source: string;
 }
 
+// RSI configuration per watch. All fields are required when enabled = true —
+// the UI forces the user to supply them (no implicit defaults).
+export interface RsiConfig {
+  enabled: boolean;
+  period: number;
+  overbought: number;
+  oversold: number;
+  signals: {
+    overboughtCross: boolean;
+    oversoldCross: boolean;
+    thresholdBreach: boolean;
+    centerlineCross: boolean;
+  };
+}
+
 // Watch configuration for monitoring a symbol (userId for per-user segregation)
 export interface WatchConfig {
   userId?: string; // Clerk user id – used to segregate polls and enforce per-user limits
@@ -74,6 +108,7 @@ export interface WatchConfig {
   trackBearish: boolean;
   exchange: string;
   currency: string;
+  rsi?: RsiConfig;
 }
 
 // EMA status for a watched symbol (sent to frontend)
@@ -81,6 +116,11 @@ export interface EmaStatus {
   emas: Record<number, number | null>;
   warmupProgress: Record<number, number>;
   lastPrice: number | null;
+  rsi?: {
+    value: number | null;
+    period: number;
+    warmupProgress: number;
+  };
 }
 
 // Monitoring status update
@@ -118,6 +158,11 @@ export interface EmaUpdate {
   timeframe: string;
   emas: Record<number, number | null>;
   warmupProgress: Record<number, number>;
+  rsi?: {
+    value: number | null;
+    period: number;
+    warmupProgress: number;
+  };
 }
 
 // Available timeframes

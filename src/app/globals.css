@@ -281,19 +281,130 @@ body {
 }
 
 .badge {
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
-  padding: 2px 10px;
+  padding: 3px 11px;
   border-radius: 20px;
+  letter-spacing: 0.01em;
 }
 
 .section-label {
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 700;
   color: var(--text-primary);
   display: flex;
   align-items: center;
   gap: 8px;
+  letter-spacing: -0.005em;
+}
+
+/* ===== Tool tile — used in the header Tools drawer ===== */
+.tool-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 12px 8px;
+  border-radius: 12px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  min-height: 64px;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.tool-tile:hover:not(:disabled) {
+  background: var(--bg-card);
+  border-color: var(--border-medium);
+  color: var(--text-primary);
+}
+
+.tool-tile:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ===== Reusable typography helpers ===== */
+.eyebrow {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+
+/* ===== Alert row — used by both EMA and RSI alert items ===== */
+/* Single line on mobile, with a thin left accent indicating direction. */
+.alert-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px 10px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-left: 3px solid transparent;
+  background: var(--bg-card);
+  transition: background 0.12s ease;
+}
+
+.alert-row:hover {
+  background: var(--bg-card-hover);
+}
+
+.alert-row.dir-bull { border-left-color: var(--green); }
+.alert-row.dir-bear { border-left-color: var(--red); }
+
+.alert-row .alert-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.alert-row .alert-symbol {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.005em;
+  line-height: 1.2;
+}
+
+.alert-row .alert-kind {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.alert-row .alert-detail {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.35;
+  margin-top: 1px;
+}
+
+.alert-row .alert-meta {
+  font-size: 10.5px;
+  color: var(--text-muted);
+  margin-top: 1px;
+  letter-spacing: 0.01em;
+}
+
+.alert-row .alert-price {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
 }
 
 /* Hide scrollbar but keep scrolling */
@@ -309,47 +420,59 @@ body {
 /* Mobile touch targets + compact layout */
 @media (max-width: 640px) {
   .tf-btn {
-    min-height: 40px;
-    min-width: 40px;
-    padding: 6px 12px;
-    font-size: 13px;
+    min-height: 42px;
+    min-width: 42px;
+    padding: 7px 14px;
+    font-size: 14px;
   }
 
   .ema-quick {
-    min-height: 40px;
+    min-height: 42px;
     padding: 6px 0;
-    font-size: 13px;
+    font-size: 14px;
   }
 
   .toggle-btn {
-    min-height: 44px;
-    padding: 8px;
-    font-size: 13px;
+    min-height: 46px;
+    padding: 10px;
+    font-size: 14px;
   }
 
   .cta {
-    min-height: 44px;
-    padding: 12px;
-    font-size: 15px;
+    min-height: 48px;
+    padding: 14px;
+    font-size: 16px;
   }
 
   .card {
-    border-radius: 20px;
-    padding: 14px;
+    border-radius: 18px;
+    padding: 16px;
   }
 
   .section-label {
-    font-size: 13px;
+    font-size: 14px;
   }
 
   .badge {
-    font-size: 10px;
-    padding: 2px 8px;
+    font-size: 11px;
+    padding: 3px 9px;
   }
 
   .input-field {
-    padding: 8px 12px;
+    padding: 10px 13px;
+    font-size: 15px;
+  }
+
+  .alert-row {
+    padding: 13px 14px;
+  }
+
+  .alert-row .alert-symbol {
     font-size: 14px;
+  }
+
+  .alert-row .alert-detail {
+    font-size: 12.5px;
   }
 }
 

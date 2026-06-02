@@ -21,6 +21,7 @@ export async function GET() {
         trackBearish: w.trackBearish,
         exchange: w.exchange,
         currency: w.currency,
+        rsi: w.rsi,
       })),
     });
   } catch (e) {

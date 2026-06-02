@@ -5,7 +5,8 @@
 // combo. Processes price ticks, detects crossovers.
 
 import { EMACalculator, CrossoverDetector } from './ema';
-import { CandleData, CrossoverAlert, WatchConfig, EmaStatus } from './types';
+import { RSICalculator, RSISignalDetector } from './rsi';
+import { CandleData, CrossoverAlert, RsiAlert, WatchConfig, EmaStatus } from './types';
 import { randomUUID } from 'crypto';
 
 /** Convert timeframe string to duration in milliseconds */
@@ -26,10 +27,18 @@ interface SymbolState {
   config: WatchConfig;
   emas: Map<number, EMACalculator>;
   detectors: CrossoverDetector[];
+  rsi: RSICalculator | null;
+  rsiDetector: RSISignalDetector | null;
   lastPrice: number | null;
   isWarmedUp: boolean;
   /** Timestamp (ms) of the last candle whose close was fed into the EMAs */
   lastProcessedCandleTs: number;
+}
+
+/** Combined alert payload from processing new candles. */
+export interface EngineAlerts {
+  crossovers: CrossoverAlert[];
+  rsi: RsiAlert[];
 }
 
 export class EMAEngine {
@@ -69,17 +78,35 @@ export class EMAEngine {
       }
     }
 
+    // Optional RSI tracker
+    let rsi: RSICalculator | null = null;
+    let rsiDetector: RSISignalDetector | null = null;
+    if (config.rsi?.enabled) {
+      rsi = new RSICalculator(config.rsi.period);
+      rsiDetector = new RSISignalDetector({
+        overbought: config.rsi.overbought,
+        oversold: config.rsi.oversold,
+        overboughtCross: config.rsi.signals.overboughtCross,
+        oversoldCross: config.rsi.signals.oversoldCross,
+        thresholdBreach: config.rsi.signals.thresholdBreach,
+        centerlineCross: config.rsi.signals.centerlineCross,
+      });
+    }
+
     this.symbols.set(key, {
       config,
       emas,
       detectors,
+      rsi,
+      rsiDetector,
       lastPrice: null,
       isWarmedUp: false,
       lastProcessedCandleTs: 0,
     });
 
+    const rsiTag = rsi ? ` + RSI(${config.rsi!.period}, ob=${config.rsi!.overbought}, os=${config.rsi!.oversold})` : '';
     console.log(
-      `📊 EMA Engine: watching ${config.symbol} (${config.timeframe}) with EMAs: [${sorted.join(', ')}] → ${detectors.length} crossover pairs`
+      `📊 EMA Engine: watching ${config.symbol} (${config.timeframe}) with EMAs: [${sorted.join(', ')}] → ${detectors.length} crossover pairs${rsiTag}`
     );
   }
 
@@ -138,6 +165,13 @@ export class EMAEngine {
           `📊 EMA(${period}) for ${symbol}: ${Math.round(progress * 100)}% warmed up (${closePrices.length}/${period} candles)`
         );
       }
+    }
+
+    // Feed warmup closes into RSI (if enabled) and seed its zone state
+    if (state.rsi && state.rsiDetector) {
+      state.rsi.bulkLoad(closePrices);
+      const rsiVal = state.rsi.getValue();
+      if (rsiVal !== null) state.rsiDetector.initFromValue(rsiVal);
     }
 
     // Initialize crossover detectors with current EMA relations
@@ -242,10 +276,10 @@ export class EMAEngine {
     currency: string,
     source: string = 'candle-close',
     userId?: string,
-  ): CrossoverAlert[] {
+  ): EngineAlerts {
     const key = this.makeKey(symbol, timeframe, userId);
     const state = this.symbols.get(key);
-    if (!state) return [];
+    if (!state) return { crossovers: [], rsi: [] };
 
     const intervalMs = timeframeToMs(timeframe);
     const now = Date.now();
@@ -270,54 +304,108 @@ export class EMAEngine {
       );
     }
 
-    // ── CRITICAL FIX: Late warmup fallback ──
+    // ── Late warmup with live-candle alert preservation ──
     // When initial warmup failed (e.g. rate-limited), lastProcessedCandleTs
-    // is still 0.  The first successful poll returns hundreds of historical
-    // candles — ALL of which pass the `> 0` filter.  Processing them one-by-
-    // one through the crossover detectors would generate dozens of stale
-    // historical alerts + email spam.
+    // is still 0 and the first successful poll returns many historical
+    // candles. Previously we suppressed ALL alerts in this batch — which
+    // also swallowed genuine crossovers on the most recent candle.
     //
-    // Instead, treat this first batch as a late warmup: feed all closes via
-    // bulkLoad, initialise the crossover detector state, set the timestamp
-    // watermark — but do NOT generate any alerts.
-    if (state.lastProcessedCandleTs === 0 && newClosedCandles.length > 1) {
-      console.log(
-        `📊 EMA Engine: late warmup for ${symbol} (${timeframe}) — feeding ${newClosedCandles.length} candles WITHOUT generating alerts`,
-      );
+    // New approach: split candles into "history" (older than 2*interval)
+    // and "live" (within the last 2*interval). Bulk-load history silently,
+    // then run live candles through the detector normally so real
+    // crossovers near startup time still fire.
+    const liveCutoffMs = now - 2 * intervalMs;
+    const isFirstBatch = state.lastProcessedCandleTs === 0 && newClosedCandles.length > 1;
 
-      const closePrices = newClosedCandles.map((c) => c.close);
+    if (isFirstBatch) {
+      const historyCandles = newClosedCandles.filter((c) => c.timestamp < liveCutoffMs);
+      const liveCandles = newClosedCandles.filter((c) => c.timestamp >= liveCutoffMs);
 
-      // Feed all historical closes into each EMA calculator
-      for (const [, calc] of state.emas) {
-        calc.bulkLoad(closePrices);
-      }
+      if (historyCandles.length > 0) {
+        console.log(
+          `📊 EMA Engine: late warmup for ${symbol} (${timeframe}) — silently feeding ${historyCandles.length} historical candle(s)`,
+        );
 
-      // Initialise crossover detector lastRelation so the next real candle
-      // doesn't produce a false crossover
-      for (const detector of state.detectors) {
-        const ema1 = state.emas.get(detector.ema1Period)?.getValue();
-        const ema2 = state.emas.get(detector.ema2Period)?.getValue();
-        if (ema1 !== null && ema1 !== undefined && ema2 !== null && ema2 !== undefined) {
-          detector.checkCrossover(ema1, ema2, closePrices[closePrices.length - 1], symbol);
+        const historyCloses = historyCandles.map((c) => c.close);
+        for (const [, calc] of state.emas) {
+          calc.bulkLoad(historyCloses);
         }
+
+        // Seed RSI silently too
+        if (state.rsi && state.rsiDetector) {
+          state.rsi.bulkLoad(historyCloses);
+          const rsiVal = state.rsi.getValue();
+          if (rsiVal !== null) state.rsiDetector.initFromValue(rsiVal);
+        }
+
+        // Seed detector lastRelation from EMA state after history replay
+        for (const detector of state.detectors) {
+          const ema1 = state.emas.get(detector.ema1Period)?.getValue();
+          const ema2 = state.emas.get(detector.ema2Period)?.getValue();
+          if (ema1 !== null && ema1 !== undefined && ema2 !== null && ema2 !== undefined) {
+            detector.checkCrossover(ema1, ema2, historyCloses[historyCloses.length - 1], symbol);
+          }
+        }
+
+        state.lastProcessedCandleTs = historyCandles[historyCandles.length - 1].timestamp;
+        state.isWarmedUp = state.emas.size > 0;
       }
 
-      state.lastProcessedCandleTs = newClosedCandles[newClosedCandles.length - 1].timestamp;
-      state.isWarmedUp = state.emas.size > 0;
-      state.lastPrice = currentPrice;
+      if (liveCandles.length > 0) {
+        console.log(
+          `📊 EMA Engine: late warmup for ${symbol} (${timeframe}) — processing ${liveCandles.length} live candle(s) WITH alerts`,
+        );
+      } else {
+        state.lastPrice = currentPrice;
+        return { crossovers: [], rsi: [] };
+      }
 
-      console.log(
-        `📊 EMA Engine: late warmup complete for ${symbol} (${timeframe}) — ${closePrices.length} candles, ready for live alerts`,
-      );
-      return [];
+      // Fall through: live candles get processed below with normal alert path
+      // by replacing newClosedCandles for the rest of the function
+      newClosedCandles.length = 0;
+      newClosedCandles.push(...liveCandles);
     }
 
     const alerts: CrossoverAlert[] = [];
+    const rsiAlerts: RsiAlert[] = [];
 
     for (const candle of newClosedCandles) {
+      const candleIso = new Date(candle.timestamp).toISOString();
+
       // Update all EMAs with the candle's confirmed close price
       for (const [, calc] of state.emas) {
         calc.update(candle.close);
+      }
+
+      // Update RSI and check for signals
+      if (state.rsi && state.rsiDetector && state.config.rsi) {
+        const rsiVal = state.rsi.update(candle.close);
+        if (rsiVal !== null && state.rsi.isReady()) {
+          const signals = state.rsiDetector.check(rsiVal, candle.close, symbol, candleIso);
+          for (const sig of signals) {
+            const rsiAlert: RsiAlert = {
+              id: randomUUID(),
+              type: 'rsi',
+              symbol,
+              timeframe,
+              signalType: sig.signalType,
+              direction: sig.direction,
+              rsiValue: parseFloat(sig.rsiValue.toFixed(2)),
+              previousRsi: parseFloat(sig.previousRsi.toFixed(2)),
+              period: state.config.rsi.period,
+              overbought: state.config.rsi.overbought,
+              oversold: state.config.rsi.oversold,
+              price: parseFloat(candle.close.toFixed(2)),
+              currency,
+              timestamp: candleIso,
+              source,
+            };
+            rsiAlerts.push(rsiAlert);
+            console.log(
+              `🚨 RSI ${sig.signalType} (${sig.direction.toUpperCase()}) on ${symbol} — RSI=${rsiAlert.rsiValue} (prev ${rsiAlert.previousRsi}) at ₹${rsiAlert.price}`,
+            );
+          }
+        }
       }
 
       // Check all crossover detectors
@@ -339,7 +427,7 @@ export class EMAEngine {
               crossoverType: result.type,
               price: parseFloat(candle.close.toFixed(2)),
               currency,
-              timestamp: new Date(candle.timestamp).toISOString(),
+              timestamp: candleIso,
               source,
             };
             alerts.push(alert);
@@ -355,7 +443,7 @@ export class EMAEngine {
 
     // Update lastPrice with live LTP for display — but do NOT feed it into EMAs
     state.lastPrice = currentPrice;
-    return alerts;
+    return { crossovers: alerts, rsi: rsiAlerts };
   }
 
   /**
@@ -374,7 +462,15 @@ export class EMAEngine {
       warmupProgress[period] = calc.warmupProgress();
     }
 
-    return { emas, warmupProgress, lastPrice: state.lastPrice };
+    const status: EmaStatus = { emas, warmupProgress, lastPrice: state.lastPrice };
+    if (state.rsi) {
+      status.rsi = {
+        value: state.rsi.getValue(),
+        period: state.rsi.getPeriod(),
+        warmupProgress: state.rsi.warmupProgress(),
+      };
+    }
+    return status;
   }
 
   /**

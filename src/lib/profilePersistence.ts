@@ -27,10 +27,23 @@ export async function ensureProfile(
 ): Promise<void> {
   const supabase = getSupabaseAdmin();
   if (!supabase) return;
+
+  // If we don't have an email, only UPDATE — never INSERT. This avoids the
+  // NOT NULL violation when read paths (getEmaSettings, getWatchlistSymbols)
+  // call ensureProfile before the user-config PUT has provided email.
+  // The profile row will be created later when an email-bearing call lands.
+  if (!opts?.email) {
+    const patch: Record<string, unknown> = { updated_at: new Date().toISOString() };
+    if (opts?.name) patch.name = opts.name;
+    const { error } = await supabase.from('profiles').update(patch).eq('user_id', userId);
+    if (error) console.warn('[profilePersistence] ensureProfile update failed:', error.message);
+    return;
+  }
+
   const row = {
     user_id: userId,
-    name: opts?.name ?? null,
-    email: opts?.email ?? null,
+    name: opts.name ?? null,
+    email: opts.email,
     updated_at: new Date().toISOString(),
   };
   const { error } = await supabase.from('profiles').upsert(row, { onConflict: 'user_id' });

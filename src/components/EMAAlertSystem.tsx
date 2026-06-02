@@ -5,6 +5,7 @@ import {
   Bell, Plus, TrendingUp, TrendingDown,
   Target, Search, Trash2, BarChart3, Zap,
   ArrowRight, Activity, Power, Wifi, WifiOff, RefreshCw, X, Pencil, Check, Mail, Download,
+  Settings, ChevronDown, Sparkles,
 } from 'lucide-react';
 import { UserButton, useUser } from '@clerk/nextjs';
 import axios from 'axios';
@@ -18,6 +19,111 @@ interface MonitoredWatch {
   trackBearish: boolean;
   exchange: string;
   currency: string;
+  rsi?: RsiPayload;
+}
+
+interface RsiSignalFlags {
+  overboughtCross: boolean;
+  oversoldCross: boolean;
+  thresholdBreach: boolean;
+  centerlineCross: boolean;
+}
+
+/** Server-side RSI config (numeric, validated). */
+interface RsiPayload {
+  enabled: boolean;
+  period: number;
+  overbought: number;
+  oversold: number;
+  signals: RsiSignalFlags;
+}
+
+/** UI form state for RSI. Strings allow empty inputs without forcing defaults. */
+interface RsiUiConfig {
+  enabled: boolean;
+  period: string;
+  overbought: string;
+  oversold: string;
+  signals: RsiSignalFlags;
+}
+
+const EMPTY_RSI_UI: RsiUiConfig = {
+  enabled: false,
+  period: '',
+  overbought: '',
+  oversold: '',
+  signals: { overboughtCross: false, oversoldCross: false, thresholdBreach: false, centerlineCross: false },
+};
+
+interface RsiLive {
+  value: number | null;
+  period: number;
+  warmupProgress: number;
+}
+
+interface RsiAlertData {
+  id: string;
+  type: 'rsi';
+  symbol: string;
+  timeframe: string;
+  signalType: 'overboughtCross' | 'oversoldCross' | 'thresholdBreach' | 'centerlineCross';
+  direction: 'bullish' | 'bearish';
+  rsiValue: number;
+  previousRsi: number;
+  period: number;
+  overbought: number;
+  oversold: number;
+  price: number;
+  currency: string;
+  timestamp: string;
+  source: string;
+}
+
+const RSI_SIGNAL_LABELS: Record<keyof RsiSignalFlags, string> = {
+  overboughtCross: 'Overbought cross',
+  oversoldCross: 'Oversold cross',
+  thresholdBreach: 'Threshold breach',
+  centerlineCross: 'Centerline cross',
+};
+
+/** Verbose labels used only in the configuration form (not the alert list). */
+const RSI_SIGNAL_LABELS_LONG: Record<keyof RsiSignalFlags, string> = {
+  overboughtCross: 'Overbought cross (bearish)',
+  oversoldCross: 'Oversold cross (bullish)',
+  thresholdBreach: 'Threshold breach',
+  centerlineCross: 'Centerline (50) cross',
+};
+
+/** Validate UI inputs and produce the server payload. */
+function buildRsiPayload(ui: RsiUiConfig): { ok: true; rsi?: RsiPayload } | { ok: false; error: string } {
+  if (!ui.enabled) return { ok: true };
+  const period = parseInt(ui.period, 10);
+  const overbought = parseFloat(ui.overbought);
+  const oversold = parseFloat(ui.oversold);
+  if (!Number.isFinite(period) || period < 2 || period > 200) {
+    return { ok: false, error: 'RSI period must be a number between 2 and 200' };
+  }
+  if (!Number.isFinite(overbought) || overbought <= 50 || overbought > 100) {
+    return { ok: false, error: 'Overbought must be a number between 51 and 100' };
+  }
+  if (!Number.isFinite(oversold) || oversold < 0 || oversold >= 50) {
+    return { ok: false, error: 'Oversold must be a number between 0 and 49' };
+  }
+  if (!Object.values(ui.signals).some(Boolean)) {
+    return { ok: false, error: 'Pick at least one RSI signal to track' };
+  }
+  return { ok: true, rsi: { enabled: true, period, overbought, oversold, signals: ui.signals } };
+}
+
+function rsiPayloadToUi(p: RsiPayload | undefined): RsiUiConfig {
+  if (!p || !p.enabled) return EMPTY_RSI_UI;
+  return {
+    enabled: true,
+    period: String(p.period),
+    overbought: String(p.overbought),
+    oversold: String(p.oversold),
+    signals: { ...p.signals },
+  };
 }
 
 // ===================================
@@ -96,6 +202,10 @@ export default function EMAAlertSystem() {
   const [showSearch, setShowSearch] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
   const [emasBySymbol, setEmasBySymbol] = useState<Record<string, EMA[]>>({});
+  const [rsiBySymbol, setRsiBySymbol] = useState<Record<string, RsiUiConfig>>({});
+  const [rsiByKey, setRsiByKey] = useState<Record<string, RsiLive>>({});
+  const [rsiAlerts, setRsiAlerts] = useState<RsiAlertData[]>([]);
+  const [rsiFormError, setRsiFormError] = useState<string | null>(null);
   const [showAddEma, setShowAddEma] = useState(false);
   const [newEmaPeriod, setNewEmaPeriod] = useState('');
   const [monitoredSymbols, setMonitoredSymbols] = useState<Set<string>>(new Set());
@@ -115,11 +225,14 @@ export default function EMAAlertSystem() {
   const [refreshModalMinTimeElapsed, setRefreshModalMinTimeElapsed] = useState(false);
   const [showSearchMobile, setShowSearchMobile] = useState(true); // search panel visible by default on mobile
   const [showEmaConfig, setShowEmaConfig] = useState(false); // collapsed on mobile by default
+  const [showSettings, setShowSettings] = useState(false); // header settings drawer
   const [replacingSymbol, setReplacingSymbol] = useState<string | null>(null);
   const [testEmailStatus, setTestEmailStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle');
   const [testEmailMessage, setTestEmailMessage] = useState<string | null>(null);
   const [testPushStatus, setTestPushStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle');
   const [testPushMessage, setTestPushMessage] = useState<string | null>(null);
+  const [cleanupStatus, setCleanupStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle');
+  const [cleanupMessage, setCleanupMessage] = useState<string | null>(null);
   const hasRestoredRef = useRef(false);
   const hasRestoredMonitoredRef = useRef(false);
   const [monitoringBusy, setMonitoringBusy] = useState(false);
@@ -142,6 +255,17 @@ export default function EMAAlertSystem() {
     () => (displaySymbol ? (emasBySymbol[displaySymbol] ?? []) : []),
     [displaySymbol, emasBySymbol]
   );
+  const rsiUi = displaySymbol ? (rsiBySymbol[displaySymbol] ?? EMPTY_RSI_UI) : EMPTY_RSI_UI;
+  const liveRsi = displaySymbol ? rsiByKey[watchKey(displaySymbol, displayTimeframe)] : undefined;
+
+  const updateRsi = useCallback((updater: (prev: RsiUiConfig) => RsiUiConfig) => {
+    if (!displaySymbol) return;
+    setRsiBySymbol((prev) => ({
+      ...prev,
+      [displaySymbol]: updater(prev[displaySymbol] ?? EMPTY_RSI_UI),
+    }));
+    setRsiFormError(null);
+  }, [displaySymbol]);
 
   useEffect(() => { setMounted(true); }, []);
 
@@ -246,6 +370,16 @@ export default function EMAAlertSystem() {
         const watches = res.data.success && Array.isArray(res.data.watches) ? res.data.watches : [];
         if (watches.length === 0) return;
         setMonitorStatus('Restoring monitoring...');
+
+        // Hydrate RSI UI state from persisted watches so the form reflects what's running
+        const rsiMap: Record<string, RsiUiConfig> = {};
+        for (const w of watches) {
+          if (w.rsi) rsiMap[w.symbol] = rsiPayloadToUi(w.rsi);
+        }
+        if (Object.keys(rsiMap).length > 0) {
+          setRsiBySymbol((prev) => ({ ...rsiMap, ...prev }));
+        }
+
         const restored: string[] = [];
         for (const w of watches) {
           try {
@@ -269,6 +403,7 @@ export default function EMAAlertSystem() {
               trackBearish: w.trackBearish,
               exchange: w.exchange,
               currency: w.currency,
+              rsi: w.rsi,
             });
             if (r.data.success) restored.push(w.symbol);
           } catch { /* skip failed */ }
@@ -288,7 +423,7 @@ export default function EMAAlertSystem() {
   // SOCKET.IO
   // ===================================
   const pendingPriceRef = useRef<Record<string, { price: number; change: number; changePercent: number; currency: string; source: string; lastUpdate: Date }>>({});
-  const pendingEmaRef = useRef<Record<string, { emas: Record<number, number | null>; warmup: Record<number, number> }>>({});
+  const pendingEmaRef = useRef<Record<string, { emas: Record<number, number | null>; warmup: Record<number, number>; rsi?: RsiLive }>>({});
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flushSocketUpdates = useCallback(() => {
     if (Object.keys(pendingPriceRef.current).length > 0) {
@@ -310,13 +445,18 @@ export default function EMAAlertSystem() {
       pendingEmaRef.current = {};
       const emaUpdates: Record<string, Record<number, number | null>> = {};
       const warmupUpdates: Record<string, Record<number, number>> = {};
+      const rsiUpdates: Record<string, RsiLive> = {};
       for (const [k, v] of Object.entries(batch)) {
         warmupUpdates[k] = v.warmup;
         const hasEmaValues = Object.keys(v.emas).some((p) => v.emas[Number(p)] != null);
         if (hasEmaValues) emaUpdates[k] = v.emas;
+        if (v.rsi) rsiUpdates[k] = v.rsi;
       }
       setEmaByKey((prev) => (Object.keys(emaUpdates).length > 0 ? { ...prev, ...emaUpdates } : prev));
       setWarmupByKey((prev) => ({ ...prev, ...warmupUpdates }));
+      if (Object.keys(rsiUpdates).length > 0) {
+        setRsiByKey((prev) => ({ ...prev, ...rsiUpdates }));
+      }
     }
     flushTimerRef.current = null;
   }, []);
@@ -377,6 +517,7 @@ export default function EMAAlertSystem() {
       if (!pendingEmaRef.current[key]) pendingEmaRef.current[key] = { emas: {}, warmup: {} };
       if (hasEmaValues) pendingEmaRef.current[key].emas = emas;
       pendingEmaRef.current[key].warmup = warmupProgress;
+      if (data.rsi) pendingEmaRef.current[key].rsi = data.rsi;
       scheduleFlush();
     });
     socket.on('alert:crossover', (alert: AlertData) => {
@@ -387,6 +528,17 @@ export default function EMAAlertSystem() {
           body: `${alert.crossoverType.toUpperCase()}: EMA(${alert.fastPeriod}) crossed ${alert.crossoverType === 'bullish' ? 'above' : 'below'} EMA(${alert.slowPeriod}) at ${getCurrencySymbol(alert.currency)}${alert.price}`,
           icon: '/signalstack-logo.png',
           tag: `alert-${alert.id}`,
+        });
+      }
+    });
+    socket.on('alert:rsi', (alert: RsiAlertData) => {
+      setRsiAlerts((prev) => [alert, ...prev].slice(0, 100));
+      if ('Notification' in window && Notification.permission === 'granted') {
+        const emoji = alert.direction === 'bullish' ? '📈' : '📉';
+        new Notification(`${emoji} ${alert.symbol} RSI ${alert.signalType}`, {
+          body: `RSI(${alert.period}) = ${alert.rsiValue} (${alert.direction}) at ${getCurrencySymbol(alert.currency)}${alert.price}`,
+          icon: '/signalstack-logo.png',
+          tag: `rsi-${alert.id}`,
         });
       }
     });
@@ -441,7 +593,7 @@ export default function EMAAlertSystem() {
     const key = watchKey(symbol, timeframe);
     const poll = async () => {
       try {
-        const { data } = await axios.get<{ emas: Record<number, number | null>; warmupProgress: Record<number, number> }>(
+        const { data } = await axios.get<{ emas: Record<number, number | null>; warmupProgress: Record<number, number>; rsi?: RsiLive }>(
           `/api/ema-status?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`
         );
         if (data?.emas && Object.keys(data.emas).length > 0) {
@@ -449,6 +601,9 @@ export default function EMAAlertSystem() {
         }
         if (data?.warmupProgress && Object.keys(data.warmupProgress).length > 0) {
           setWarmupByKey((prev) => ({ ...prev, [key]: { ...prev[key], ...data.warmupProgress } }));
+        }
+        if (data?.rsi) {
+          setRsiByKey((prev) => ({ ...prev, [key]: data.rsi! }));
         }
       } catch {
         // ignore (e.g. serverless or no server)
@@ -765,6 +920,13 @@ export default function EMAAlertSystem() {
       setMonitorStatus(`${sym}: add at least 2 EMAs before starting monitoring.`);
       return;
     }
+    const symRsiUi = rsiBySymbol[sym] ?? EMPTY_RSI_UI;
+    const rsiCheck = buildRsiPayload(symRsiUi);
+    if (!rsiCheck.ok) {
+      setRsiFormError(rsiCheck.error);
+      setMonitorStatus(`${sym}: ${rsiCheck.error}`);
+      return;
+    }
     const s = symbols.find((x) => x.symbol === sym);
     if (!s) return;
     const tf = getTimeframe(sym);
@@ -779,6 +941,7 @@ export default function EMAAlertSystem() {
         trackBearish,
         exchange: s.exchange || 'NSE',
         currency: s.currency,
+        rsi: rsiCheck.rsi,
       });
       if (res.data.success) {
         setMonitoredSymbols((prev) => new Set(prev).add(sym));
@@ -1056,6 +1219,60 @@ export default function EMAAlertSystem() {
     }
   };
 
+  type CombinedAlert =
+    | { kind: 'crossover'; data: AlertData }
+    | { kind: 'rsi'; data: RsiAlertData };
+  const combinedAlerts = useMemo<CombinedAlert[]>(() => {
+    const xs: CombinedAlert[] = [];
+    for (const a of alerts) xs.push({ kind: 'crossover', data: a });
+    for (const a of rsiAlerts) xs.push({ kind: 'rsi', data: a });
+    xs.sort((a, b) => new Date(b.data.timestamp).getTime() - new Date(a.data.timestamp).getTime());
+    return xs.slice(0, 200);
+  }, [alerts, rsiAlerts]);
+
+  const runCleanup = async () => {
+    if (cleanupStatus === 'running') return;
+    const ok = window.confirm(
+      "Clean up your account?\n\nThis removes duplicate symbol entries (e.g. \"NIFTY 50\" + \"Nifty 50\") and stops any orphaned watches that aren't in your current symbol list.\n\nSafe and reversible — duplicates just take the entry with more EMAs configured.",
+    );
+    if (!ok) return;
+    setCleanupStatus('running');
+    setCleanupMessage(null);
+    try {
+      const res = await axios.post<{ success: boolean; duplicatesRemoved?: string[]; orphansStopped?: string[]; error?: string }>(
+        '/api/user/cleanup',
+        {},
+      );
+      if (res.data.success) {
+        const dups = res.data.duplicatesRemoved ?? [];
+        const orphans = res.data.orphansStopped ?? [];
+        if (dups.length === 0 && orphans.length === 0) {
+          setCleanupStatus('success');
+          setCleanupMessage('Nothing to clean — your account is already tidy.');
+        } else {
+          const parts: string[] = [];
+          if (dups.length > 0) parts.push(`Removed ${dups.length} duplicate(s): ${dups.join(', ')}`);
+          if (orphans.length > 0) parts.push(`Stopped ${orphans.length} orphan watch(es): ${orphans.join(', ')}`);
+          setCleanupStatus('success');
+          setCleanupMessage(parts.join(' · '));
+          // Refresh local state to reflect the cleanup
+          if (userId) refetchWatches();
+          hasRestoredRef.current = false;
+          hasRestoredMonitoredRef.current = false;
+        }
+        setTimeout(() => { setCleanupStatus('idle'); setCleanupMessage(null); }, 10000);
+      } else {
+        setCleanupStatus('error');
+        setCleanupMessage(res.data.error ?? 'Cleanup failed');
+        setTimeout(() => { setCleanupStatus('idle'); setCleanupMessage(null); }, 6000);
+      }
+    } catch (err: any) {
+      setCleanupStatus('error');
+      setCleanupMessage(err?.response?.data?.error ?? err?.message ?? 'Cleanup failed');
+      setTimeout(() => { setCleanupStatus('idle'); setCleanupMessage(null); }, 6000);
+    }
+  };
+
   const crossoverPairs = useMemo((): [EMA, EMA][] => {
     const pairs: [EMA, EMA][] = [];
     const sorted = [...emas].sort((a, b) => a.period - b.period);
@@ -1104,7 +1321,7 @@ export default function EMAAlertSystem() {
               <img src="/signalstack-logo.png" alt="Logo" className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex-shrink-0" />
               <div className="min-w-0">
                 <h1 className="text-base sm:text-lg font-bold truncate" style={{ color: 'var(--text-primary)' }}>SignalStack</h1>
-                <p className="text-[10px] sm:text-[11px] font-medium tracking-wider uppercase" style={{ color: 'var(--text-muted)' }}>EMA Alerts</p>
+                <p className="text-[11px] sm:text-xs font-semibold tracking-wider uppercase" style={{ color: 'var(--text-muted)' }}>EMA + RSI Alerts</p>
               </div>
             </div>
             <div className="flex-shrink-0">
@@ -1121,173 +1338,156 @@ export default function EMAAlertSystem() {
               />
             </div>
           </div>
-          {/* Row 2: Action buttons — wrap within padded container */}
-          <div className="flex flex-wrap items-center gap-2 mt-3 min-w-0">
+          {/* Row 2: compact status strip — Live + Alerts toggle + Settings toggle */}
+          <div className="flex items-center gap-2 mt-3 min-w-0">
             <div
-              className={`flex items-center gap-1 sm:gap-1.5 text-xs font-semibold px-2.5 py-2 sm:px-3 rounded-lg border min-h-[44px] flex-shrink-0 ${connected ? 'border-green-600/30 text-green-700' : 'border-red-600/30 text-red-700'
-                }`}
+              className={`inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded-full border flex-shrink-0 ${connected ? 'border-green-600/30 text-green-700' : 'border-red-600/30 text-red-700'}`}
               style={{ background: connected ? 'var(--green-bg)' : 'var(--red-bg)' }}
-              title={connected ? 'Real-time updates connected' : 'Not connected. Use the deployment where the Node server runs (e.g. Railway URL) for Live updates.'}
+              title={connected ? 'Real-time updates connected' : 'Not connected to the Node server.'}
             >
-              <span className={`w-2 h-2 rounded-full flex-shrink-0 ${connected ? 'bg-green-500 anim-live' : 'bg-red-500'}`} />
-              {connected ? <Wifi className="w-3.5 h-3.5 flex-shrink-0" /> : <WifiOff className="w-3.5 h-3.5 flex-shrink-0" />}
+              <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${connected ? 'bg-green-500 anim-live' : 'bg-red-500'}`} />
               <span>{connected ? 'Live' : 'Offline'}</span>
             </div>
-            {userId && (
-              <div className="flex flex-col items-end gap-0.5">
-                <button
-                  type="button"
-                  onClick={sendTestEmail}
-                  disabled={testEmailStatus === 'sending'}
-                  className="tf-btn flex items-center gap-1.5 !text-xs min-h-[44px] flex-shrink-0"
-                  title="Send a test email to your account email. Check spam if you don’t see it."
-                >
-                  <Mail className="w-3.5 h-3.5" />
-                  <span>
-                    {testEmailStatus === 'sending' ? 'Sending…' : testEmailStatus === 'success' ? 'Sent!' : testEmailStatus === 'error' ? 'Failed' : 'Test email'}
-                  </span>
-                </button>
-                {testEmailMessage && (
-                  <span className="text-[10px] max-w-[200px] truncate text-right" style={{ color: 'var(--text-muted)' }} title={testEmailMessage}>
-                    {testEmailStatus === 'success' ? testEmailMessage : testEmailMessage}
-                  </span>
-                )}
-              </div>
-            )}
-            {userId && (
-              <a
-                href="/api/alert-log"
-                download
-                className="tf-btn hidden sm:flex items-center gap-1.5 !text-xs min-h-[44px] flex-shrink-0"
-                title="Download the crossover alert log (xlsx) for cross-referencing with TradingView"
+
+            {mounted && 'serviceWorker' in navigator && pushAvailable !== false && (
+              <button
+                type="button"
+                onClick={pushEnabled ? disablePush : enablePush}
+                className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-semibold flex-shrink-0"
                 style={{
-                  background: 'var(--blue-bg, rgba(37,99,235,0.08))',
-                  borderColor: 'rgba(37,99,235,0.4)',
-                  color: '#2563eb',
-                  fontWeight: 600,
+                  borderColor: pushEnabled ? 'rgba(22,163,74,0.5)' : 'var(--border-subtle)',
+                  background: pushEnabled ? 'var(--green-bg)' : 'transparent',
+                  color: pushEnabled ? 'var(--green)' : 'var(--text-secondary)',
                 }}
+                title={pushEnabled ? 'Notifications on — tap to turn off' : 'Tap to enable browser + email notifications'}
+                aria-pressed={pushEnabled}
               >
-                <Download className="w-3.5 h-3.5" />
-                <span>Alert log</span>
-              </a>
+                <Bell className="w-3.5 h-3.5" />
+                <span>{pushEnabled ? 'Notifications on' : 'Notifications off'}</span>
+              </button>
             )}
-            {mounted && 'serviceWorker' in navigator && (
-              pushAvailable === false ? (
-                <span
-                  className="text-[10px] sm:text-xs px-2 py-1.5 rounded-lg border border-amber-600/30 text-amber-700 flex-shrink-0"
-                  title="Add VAPID env vars in production to enable alerts"
-                >
-                  Alerts unavailable
-                </span>
-              ) : (
-                <div className="flex items-center gap-3 flex-wrap">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[10px] sm:text-xs font-medium uppercase tracking-wide" style={{ color: 'var(--text-muted)' }}>
-                      Alerts
-                    </span>
-                    <button
-                      type="button"
-                      onClick={pushEnabled ? disablePush : enablePush}
-                      role="switch"
-                      aria-checked={pushEnabled}
-                      className="relative inline-flex items-center h-5 w-9 rounded-full border transition-colors duration-150"
-                      style={{
-                        borderColor: pushEnabled ? 'rgba(22,163,74,0.6)' : 'rgba(148,163,184,0.8)',
-                        background: pushEnabled ? 'var(--green-bg)' : 'rgba(148,163,184,0.12)',
-                      }}
-                      title={pushEnabled ? 'Turn alerts off for this device' : 'Enable browser + email crossover alerts on this device'}
-                      aria-label={pushEnabled ? 'Alerts on – click to turn off' : 'Alerts off – click to turn on'}
-                    >
-                      <span
-                        className={`inline-flex items-center justify-center w-4 h-4 rounded-full bg-white shadow-sm transform transition-transform duration-150 ${
-                          pushEnabled ? 'translate-x-4' : 'translate-x-0'
-                        }`}
-                      >
-                        <Bell className="w-3 h-3" style={{ color: pushEnabled ? 'var(--green)' : 'var(--text-muted)' }} />
-                      </span>
-                    </button>
-                  </div>
 
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <button
-                      onClick={() => sendTestPush(0)}
-                      disabled={testPushStatus === 'sending'}
-                      className="px-2.5 py-1.5 rounded-full border text-[10px] sm:text-xs font-medium flex items-center gap-1 disabled:opacity-60 disabled:cursor-not-allowed flex-shrink-0"
-                      style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
-                      title="Send a test push now (shows in this tab too)"
-                      aria-label="Send test push notification"
-                    >
-                      <Bell className="w-3 h-3" />
-                      <span>Test now</span>
-                    </button>
-                    <button
-                      onClick={() => sendTestPush(60)}
-                      disabled={testPushStatus === 'sending'}
-                      className="px-2.5 py-1.5 rounded-full border text-[10px] sm:text-xs font-medium flex items-center gap-1 disabled:opacity-60 disabled:cursor-not-allowed flex-shrink-0"
-                      style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
-                      title="Send a test in 1 minute (good to verify when the browser is closed)"
-                      aria-label="Send delayed test push notification"
-                    >
-                      <Bell className="w-3 h-3" />
-                      <span>Test later</span>
-                    </button>
-                  </div>
+            {mounted && pushAvailable === false && (
+              <span className="text-[11px] px-2 py-1 rounded-full border border-amber-600/30 text-amber-700 flex-shrink-0" title="Server is missing VAPID keys">
+                Alerts unavailable
+              </span>
+            )}
 
-                  {testPushMessage && (
-                    <span
-                      className="text-[10px] max-w-[220px] truncate"
-                      style={{ color: 'var(--text-muted)' }}
-                      title={testPushMessage}
-                    >
-                      {testPushMessage}
-                    </span>
-                  )}
-                </div>
-              )
+            <div className="flex-1" />
+
+            {userId && (
+              <button
+                type="button"
+                onClick={() => setShowSettings((s) => !s)}
+                aria-expanded={showSettings}
+                aria-controls="header-tools-drawer"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-semibold flex-shrink-0"
+                style={{
+                  borderColor: showSettings ? 'var(--accent)' : 'var(--border-subtle)',
+                  color: showSettings ? 'var(--accent)' : 'var(--text-secondary)',
+                  background: showSettings ? 'rgba(14,165,233,0.06)' : 'transparent',
+                }}
+                title="Tools: test alerts, download log"
+              >
+                <Settings className="w-3.5 h-3.5" />
+                <span>Tools</span>
+                <ChevronDown className={`w-3 h-3 transition-transform ${showSettings ? 'rotate-180' : ''}`} />
+              </button>
             )}
           </div>
         </header>
 
-        {/* Mobile-only: prominent Alert log download button (the one in the wrap-row can get pushed off on narrow screens) */}
-        {userId && (
-          <a
-            href="/api/alert-log"
-            download
-            className="sm:hidden flex items-center justify-center gap-2 w-full mb-3 px-3 py-3 rounded-xl border text-sm font-semibold min-h-[44px]"
-            title="Download the crossover alert log (xlsx)"
-            style={{
-              background: 'var(--blue-bg, rgba(37,99,235,0.08))',
-              borderColor: 'rgba(37,99,235,0.4)',
-              color: '#2563eb',
-            }}
+        {/* Tools drawer — test buttons, alert log download */}
+        {userId && showSettings && (
+          <div
+            id="header-tools-drawer"
+            className="card !p-3 sm:!p-4 mb-3 sm:mb-4 anim-fade-up"
           >
-            <Download className="w-4 h-4" />
-            <span>Download Alert log (xlsx)</span>
-          </a>
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+              <button
+                type="button"
+                onClick={sendTestEmail}
+                disabled={testEmailStatus === 'sending'}
+                className="tool-tile"
+                title="Send a test email to verify delivery"
+              >
+                <Mail className="w-4 h-4" style={{ color: 'var(--accent)' }} />
+                <span>{testEmailStatus === 'sending' ? 'Sending…' : testEmailStatus === 'success' ? 'Email sent' : testEmailStatus === 'error' ? 'Email failed' : 'Test email'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => sendTestPush(0)}
+                disabled={testPushStatus === 'sending' || !pushEnabled}
+                className="tool-tile"
+                title={pushEnabled ? 'Send a test push notification now' : 'Enable notifications first'}
+              >
+                <Bell className="w-4 h-4" style={{ color: 'var(--accent)' }} />
+                <span>Test push now</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => sendTestPush(60)}
+                disabled={testPushStatus === 'sending' || !pushEnabled}
+                className="tool-tile"
+                title="Send a test push in 1 minute (verify with browser closed)"
+              >
+                <Bell className="w-4 h-4" style={{ color: 'var(--accent)' }} />
+                <span>Test push later</span>
+              </button>
+              <a
+                href="/api/alert-log"
+                download
+                className="tool-tile"
+                title="Download crossover alert log (xlsx)"
+              >
+                <Download className="w-4 h-4" style={{ color: 'var(--accent)' }} />
+                <span>Download log</span>
+              </a>
+              <button
+                type="button"
+                onClick={runCleanup}
+                disabled={cleanupStatus === 'running'}
+                className="tool-tile"
+                title="Remove duplicate symbol entries and stop orphan watches"
+              >
+                <Sparkles className="w-4 h-4" style={{ color: 'var(--purple)' }} />
+                <span>
+                  {cleanupStatus === 'running' ? 'Cleaning…' : cleanupStatus === 'success' ? 'Cleaned!' : cleanupStatus === 'error' ? 'Failed' : 'Tidy account'}
+                </span>
+              </button>
+            </div>
+            {(testEmailMessage || testPushMessage || cleanupMessage) && (
+              <div className="mt-3 text-[11px] leading-snug space-y-1" style={{ color: 'var(--text-muted)' }}>
+                {testEmailMessage && <div>Email: {testEmailMessage}</div>}
+                {testPushMessage && <div>Push: {testPushMessage}</div>}
+                {cleanupMessage && <div>Cleanup: {cleanupMessage}</div>}
+              </div>
+            )}
+          </div>
         )}
 
-        {/* ─── MONITORING / STATUS BANNER (compact on mobile) ─── */}
+        {/* ─── MONITORING / STATUS BANNER — subtle pill-style strip ─── */}
         {(isMonitoring || monitorStatus) && (
-          <div className="mb-3 sm:mb-4 px-3 sm:px-4 py-2.5 sm:py-3 rounded-xl flex items-center justify-between gap-2"
-            style={{ background: 'var(--green-bg)', border: '1px solid rgba(22,163,74,0.2)' }}>
+          <div className="mb-3 sm:mb-4 px-3 py-2 rounded-lg flex items-center justify-between gap-2 border"
+            style={{ background: 'var(--bg-card)', borderColor: 'var(--border-subtle)' }}>
             <div className="flex items-center gap-2 min-w-0 flex-1">
-              <div className="relative flex-shrink-0">
-                <Activity className="w-4 h-4 sm:w-5 sm:h-5 text-green-600" />
-                <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-emerald-400 rounded-full animate-ping" />
-              </div>
-              <span className="text-green-600/80 text-xs truncate">
-                {monitorStatus || `${monitoredSymbols.size} active`}
+              <span className="relative flex-shrink-0 w-2 h-2">
+                <span className="absolute inset-0 w-2 h-2 bg-green-500 rounded-full" />
+                <span className="absolute inset-0 w-2 h-2 bg-emerald-400 rounded-full animate-ping" />
+              </span>
+              <span className="text-xs font-medium truncate" style={{ color: 'var(--text-secondary)' }}>
+                {monitorStatus || `Monitoring ${monitoredSymbols.size} symbol${monitoredSymbols.size === 1 ? '' : 's'}`}
               </span>
             </div>
             {isMonitoring && (
               <button
                 onClick={stopMonitoring}
-                className="flex-shrink-0 flex items-center gap-1 px-2.5 py-1.5 sm:px-3.5 sm:py-2 rounded-lg text-xs font-semibold"
-                style={{ background: 'var(--red-bg)', border: '1px solid rgba(220,38,38,0.2)', color: 'var(--red)' }}
+                className="flex-shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold"
+                style={{ color: 'var(--red)' }}
+                title="Stop monitoring all symbols"
               >
-                <Power className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">Stop all</span>
-                <span className="sm:hidden">Stop</span>
+                <Power className="w-3 h-3" />
+                <span>Stop all</span>
               </button>
             )}
           </div>
@@ -1450,15 +1650,17 @@ export default function EMAAlertSystem() {
                 )}
               </div>
             </div>
-            <div className="flex items-center justify-end gap-2">
+            <div className="flex items-center justify-end gap-1.5 sm:gap-2">
               <button
                 type="button"
                 onClick={() => { setShowSearch(true); setShowSearchMobile(true); setReplacingSymbol(null); queueMicrotask(() => searchInputRef.current?.focus()); }}
-                className="px-3 py-2 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5"
-                style={{ borderColor: 'var(--border-subtle)', color: 'var(--accent)' }}
+                className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold min-h-[40px]"
+                style={{ background: 'var(--accent)', color: '#fff' }}
+                title="Add new symbol"
+                aria-label="Add new symbol"
               >
                 <Plus className="w-4 h-4" />
-                <span>New</span>
+                <span>Add</span>
               </button>
               {symbols.length > 0 && displaySymbol && (
                 <>
@@ -1470,20 +1672,22 @@ export default function EMAAlertSystem() {
                       setReplacingSymbol(displaySymbol);
                       queueMicrotask(() => searchInputRef.current?.focus());
                     }}
-                    className="px-3 py-2 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5"
+                    className="inline-flex items-center justify-center w-10 h-10 rounded-lg border"
                     style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
+                    title={`Replace ${displaySymbol} with another symbol`}
+                    aria-label={`Replace ${displaySymbol}`}
                   >
-                    <Search className="w-4 h-4" />
-                    <span>Replace</span>
+                    <Pencil className="w-4 h-4" />
                   </button>
                   <button
                     type="button"
                     onClick={() => displaySymbol && removeSymbol(displaySymbol)}
-                    className="px-3 py-2 rounded-xl border text-xs font-semibold flex items-center justify-center gap-1.5"
-                    style={{ borderColor: 'rgba(220,38,38,0.4)', color: 'var(--red)' }}
+                    className="inline-flex items-center justify-center w-10 h-10 rounded-lg border"
+                    style={{ borderColor: 'rgba(220,38,38,0.3)', color: 'var(--red)' }}
+                    title={`Remove ${displaySymbol}`}
+                    aria-label={`Remove ${displaySymbol}`}
                   >
                     <Trash2 className="w-4 h-4" />
-                    <span>Delete</span>
                   </button>
                 </>
               )}
@@ -1666,7 +1870,7 @@ export default function EMAAlertSystem() {
                         );
                       })()}
                     </div>
-                    <span className="text-xl sm:text-2xl font-extrabold tracking-tight truncate" style={{ color: 'var(--text-primary)' }}>
+                    <span className="text-2xl sm:text-3xl font-extrabold tracking-tight truncate" style={{ color: 'var(--text-primary)', fontVariantNumeric: 'tabular-nums' }}>
                       {getCurrencySymbol(displayPrice.currency)}{displayPrice.price.toFixed(2)}
                     </span>
                     <div className="flex flex-col items-end min-w-0">
@@ -1696,7 +1900,7 @@ export default function EMAAlertSystem() {
         </div>
 
         {/* ─── MAIN CONTENT ─── */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5">
 
           {/* ─── LEFT: EMA Config (collapsible on mobile) ─── */}
           <div className="lg:col-span-5">
@@ -1859,6 +2063,153 @@ export default function EMAAlertSystem() {
                 </button>
               </div>{/* end collapsible */}
             </div>{/* end card */}
+
+            {/* ─── RSI Config Card ─── */}
+            <div className="card !p-3 sm:!p-5 mt-3 sm:mt-4">
+              <div className="flex items-center justify-between gap-2 mb-3 min-w-0">
+                <div className="section-label flex items-center gap-2 min-w-0">
+                  <Activity className="w-4 h-4 flex-shrink-0" style={{ color: 'var(--purple)' }} />
+                  <span className="truncate">
+                    RSI {displaySymbol && <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>({displaySymbol})</span>}
+                  </span>
+                </div>
+                <label className="inline-flex items-center gap-2 cursor-pointer select-none" title="Enable RSI tracking for this symbol">
+                  <input
+                    type="checkbox"
+                    className="w-4 h-4"
+                    checked={rsiUi.enabled}
+                    disabled={!displaySymbol}
+                    onChange={(e) => updateRsi((prev) => ({ ...prev, enabled: e.target.checked }))}
+                  />
+                  <span className="text-xs font-semibold" style={{ color: 'var(--text-secondary)' }}>
+                    {rsiUi.enabled ? 'Enabled' : 'Off'}
+                  </span>
+                </label>
+              </div>
+
+              {!displaySymbol ? (
+                <div className="text-center py-4 text-xs" style={{ color: 'var(--text-muted)' }}>
+                  Select a symbol to configure RSI
+                </div>
+              ) : !rsiUi.enabled ? (
+                <p className="text-xs leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+                  RSI (Relative Strength Index, 0–100) measures momentum. Enable to set period &
+                  thresholds, and pick which signals fire alerts. Standard reference: 70 = overbought,
+                  30 = oversold, 50 = trend midline.
+                </p>
+              ) : (
+                <div className="space-y-3">
+                  {/* Live RSI value */}
+                  {liveRsi && liveRsi.value != null && (
+                    <div className="flex items-center justify-between px-3 py-2 rounded-lg"
+                      style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}>
+                      <span className="text-xs font-semibold" style={{ color: 'var(--text-muted)' }}>
+                        Live RSI({liveRsi.period})
+                      </span>
+                      <span className="text-sm font-mono font-bold" style={{
+                        color: liveRsi.value >= 70 ? 'var(--red)' : liveRsi.value <= 30 ? 'var(--green)' : 'var(--text-primary)',
+                      }}>
+                        {liveRsi.value.toFixed(2)}
+                      </span>
+                    </div>
+                  )}
+                  {liveRsi && liveRsi.warmupProgress < 1 && (
+                    <div className="flex items-center gap-2 text-xs" style={{ color: 'var(--text-muted)' }}>
+                      <div className="flex-1 h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border-subtle)' }}>
+                        <div className="h-full rounded-full transition-all duration-500"
+                          style={{ width: `${liveRsi.warmupProgress * 100}%`, background: 'var(--purple)' }} />
+                      </div>
+                      <span className="font-mono">{Math.round(liveRsi.warmupProgress * 100)}% warmed</span>
+                    </div>
+                  )}
+
+                  {/* Period + threshold inputs */}
+                  <div className="grid grid-cols-3 gap-2">
+                    <label className="flex flex-col gap-1">
+                      <span className="eyebrow" style={{ color: 'var(--text-muted)' }}>
+                        Period
+                      </span>
+                      <input
+                        type="number"
+                        min="2"
+                        max="200"
+                        value={rsiUi.period}
+                        onChange={(e) => updateRsi((prev) => ({ ...prev, period: e.target.value }))}
+                        className="input-field text-sm !py-2"
+                        placeholder="e.g. 14"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="eyebrow" style={{ color: 'var(--text-muted)' }}>
+                        Overbought
+                      </span>
+                      <input
+                        type="number"
+                        min="51"
+                        max="100"
+                        value={rsiUi.overbought}
+                        onChange={(e) => updateRsi((prev) => ({ ...prev, overbought: e.target.value }))}
+                        className="input-field text-sm !py-2"
+                        placeholder="e.g. 70"
+                      />
+                    </label>
+                    <label className="flex flex-col gap-1">
+                      <span className="eyebrow" style={{ color: 'var(--text-muted)' }}>
+                        Oversold
+                      </span>
+                      <input
+                        type="number"
+                        min="0"
+                        max="49"
+                        value={rsiUi.oversold}
+                        onChange={(e) => updateRsi((prev) => ({ ...prev, oversold: e.target.value }))}
+                        className="input-field text-sm !py-2"
+                        placeholder="e.g. 30"
+                      />
+                    </label>
+                  </div>
+
+                  {/* Signal toggles */}
+                  <div>
+                    <div className="eyebrow mb-2" style={{ color: 'var(--text-muted)' }}>
+                      Alerts to fire
+                    </div>
+                    <div className="space-y-1.5">
+                      {(Object.keys(RSI_SIGNAL_LABELS_LONG) as Array<keyof RsiSignalFlags>).map((key) => (
+                        <label key={key} className="flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer"
+                          style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}>
+                          <input
+                            type="checkbox"
+                            className="w-4 h-4"
+                            checked={rsiUi.signals[key]}
+                            onChange={(e) =>
+                              updateRsi((prev) => ({
+                                ...prev,
+                                signals: { ...prev.signals, [key]: e.target.checked },
+                              }))
+                            }
+                          />
+                          <span className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>
+                            {RSI_SIGNAL_LABELS_LONG[key]}
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  {rsiFormError && (
+                    <div className="text-xs px-3 py-2 rounded-lg" style={{ background: 'var(--red-bg)', color: 'var(--red)' }}>
+                      {rsiFormError}
+                    </div>
+                  )}
+
+                  <p className="text-[11px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+                    Changes apply when you start monitoring. If a watch is already running,
+                    stop &amp; restart it to apply new RSI settings.
+                  </p>
+                </div>
+              )}
+            </div>
           </div>{/* end lg:col-span-5 */}
 
           {/* ─── RIGHT: Pairs + Alerts ─── */}
@@ -2022,46 +2373,72 @@ export default function EMAAlertSystem() {
                   Alerts
                 </div>
                 <span className="badge" style={{ background: 'rgba(251,191,36,0.12)', color: 'var(--amber)' }}>
-                  {alerts.length}
+                  {combinedAlerts.length}
                 </span>
               </div>
 
-              <div className="space-y-2.5 max-h-[450px] overflow-y-auto">
-                {alerts.length === 0 ? (
+              <div className="space-y-1.5 max-h-[420px] overflow-y-auto pr-1">
+                {combinedAlerts.length === 0 ? (
                   <div className="text-center py-8" style={{ color: 'var(--text-muted)' }}>
-                    <Bell className="w-8 h-8 mx-auto mb-2 opacity-30" />
-                    <p className="text-sm font-medium">No alerts yet</p>
-                    <p className="text-xs mt-1 opacity-60">Crossover alerts will appear here when detected</p>
+                    <Bell className="w-8 h-8 mx-auto mb-2 opacity-25" />
+                    <p className="text-sm font-semibold" style={{ color: 'var(--text-secondary)' }}>No alerts yet</p>
+                    <p className="text-xs mt-1 opacity-70 max-w-[220px] mx-auto leading-relaxed">
+                      EMA crossovers and RSI signals appear here as they happen
+                    </p>
                   </div>
                 ) : (
-                  alerts.map((a) => (
-                    <div key={a.id} className="p-4 rounded-xl" style={{
-                      background: a.crossoverType === 'bullish' ? 'var(--green-bg)' : 'var(--red-bg)',
-                      borderLeft: `3px solid ${a.crossoverType === 'bullish' ? 'var(--green)' : 'var(--red)'}`,
-                    }}>
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-3">
-                          {a.crossoverType === 'bullish' ? (
-                            <TrendingUp className="w-5 h-5 flex-shrink-0" style={{ color: 'var(--green)' }} />
-                          ) : (
-                            <TrendingDown className="w-5 h-5 flex-shrink-0" style={{ color: 'var(--red)' }} />
-                          )}
-                          <div>
-                            <div className="font-bold text-sm" style={{ color: 'var(--text-primary)' }}>{a.symbol}</div>
-                            <div className="text-sm" style={{ color: 'var(--text-secondary)' }}>
-                              EMA({a.fastPeriod}) {a.crossoverType === 'bullish' ? '↑ crossed above' : '↓ crossed below'} EMA({a.slowPeriod})
+                  combinedAlerts.map((item) => {
+                    const time = new Date(item.data.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                    if (item.kind === 'crossover') {
+                      const a = item.data;
+                      const isBull = a.crossoverType === 'bullish';
+                      return (
+                        <div key={a.id} className={`alert-row ${isBull ? 'dir-bull' : 'dir-bear'}`}>
+                          <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                            <div className="alert-icon" style={{ background: isBull ? 'var(--green-bg)' : 'var(--red-bg)' }}>
+                              {isBull ? (
+                                <TrendingUp className="w-4 h-4" style={{ color: 'var(--green)' }} />
+                              ) : (
+                                <TrendingDown className="w-4 h-4" style={{ color: 'var(--red)' }} />
+                              )}
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-baseline gap-2 min-w-0">
+                                <span className="alert-symbol truncate">{a.symbol}</span>
+                                <span className="alert-kind flex-shrink-0">EMA</span>
+                              </div>
+                              <div className="alert-detail truncate">
+                                EMA({a.fastPeriod}) {isBull ? '↑' : '↓'} EMA({a.slowPeriod}) · {time} · {a.timeframe}
+                              </div>
+                            </div>
+                          </div>
+                          <div className="alert-price flex-shrink-0">{getCurrencySymbol(a.currency)}{a.price}</div>
+                        </div>
+                      );
+                    }
+                    const a = item.data;
+                    const label = RSI_SIGNAL_LABELS[a.signalType];
+                    const isBull = a.direction === 'bullish';
+                    return (
+                      <div key={a.id} className={`alert-row ${isBull ? 'dir-bull' : 'dir-bear'}`}>
+                        <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                          <div className="alert-icon" style={{ background: 'rgba(124, 58, 237, 0.12)' }}>
+                            <Activity className="w-4 h-4" style={{ color: 'var(--purple)' }} />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-baseline gap-2 min-w-0">
+                              <span className="alert-symbol truncate">{a.symbol}</span>
+                              <span className="alert-kind flex-shrink-0">RSI</span>
+                            </div>
+                            <div className="alert-detail truncate">
+                              {label} · RSI({a.period}) {a.rsiValue} · {time} · {a.timeframe}
                             </div>
                           </div>
                         </div>
-                        <div className="text-right flex-shrink-0">
-                          <div className="font-bold text-sm" style={{ color: 'var(--text-primary)' }}>{getCurrencySymbol(a.currency)}{a.price}</div>
-                          <div className="text-xs" style={{ color: 'var(--text-muted)' }}>
-                            {new Date(a.timestamp).toLocaleTimeString()} · {a.timeframe}
-                          </div>
-                        </div>
+                        <div className="alert-price flex-shrink-0">{getCurrencySymbol(a.currency)}{a.price}</div>
                       </div>
-                    </div>
-                  ))
+                    );
+                  })
                 )}
               </div>
             </div>

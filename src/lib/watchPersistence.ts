@@ -3,7 +3,7 @@
  * Survives process restarts so monitoring can auto-restore without the UI.
  */
 
-import { WatchConfig } from './types';
+import { WatchConfig, RsiConfig } from './types';
 import { getSupabaseAdmin } from './supabaseServer';
 
 interface WatchRow {
@@ -16,10 +16,33 @@ interface WatchRow {
   track_bearish: boolean;
   exchange: string;
   currency: string;
+  rsi_config: RsiConfig | null;
+}
+
+function parseRsi(raw: unknown): RsiConfig | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const r = raw as Partial<RsiConfig> & { signals?: Partial<RsiConfig['signals']> };
+  if (!r.enabled) return undefined;
+  if (typeof r.period !== 'number' || typeof r.overbought !== 'number' || typeof r.oversold !== 'number') {
+    return undefined;
+  }
+  const s: Partial<RsiConfig['signals']> = r.signals ?? {};
+  return {
+    enabled: true,
+    period: r.period,
+    overbought: r.overbought,
+    oversold: r.oversold,
+    signals: {
+      overboughtCross: !!s.overboughtCross,
+      oversoldCross: !!s.oversoldCross,
+      thresholdBreach: !!s.thresholdBreach,
+      centerlineCross: !!s.centerlineCross,
+    },
+  };
 }
 
 function rowToConfig(row: WatchRow): WatchConfig {
-  return {
+  const cfg: WatchConfig = {
     userId: row.user_id,
     symbol: row.symbol,
     timeframe: row.timeframe,
@@ -29,6 +52,9 @@ function rowToConfig(row: WatchRow): WatchConfig {
     exchange: row.exchange || 'NSE',
     currency: row.currency || 'INR',
   };
+  const rsi = parseRsi(row.rsi_config);
+  if (rsi) cfg.rsi = rsi;
+  return cfg;
 }
 
 export async function getAllWatches(): Promise<WatchConfig[]> {
@@ -69,6 +95,7 @@ export async function saveWatch(config: WatchConfig): Promise<void> {
     track_bearish: config.trackBearish !== false,
     exchange: config.exchange || 'NSE',
     currency: config.currency || 'INR',
+    rsi_config: config.rsi?.enabled ? config.rsi : null,
   };
   const { error } = await supabase.from('watches').upsert(row, {
     onConflict: 'user_id,symbol,timeframe',

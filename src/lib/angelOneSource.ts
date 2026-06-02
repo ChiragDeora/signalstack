@@ -119,6 +119,50 @@ export class AngelOneDataSource {
   private session: AngelSession | null = null;
   /** Single in-flight promise so many concurrent callers don't all trigger login at once. */
   private sessionPromise: Promise<boolean> | null = null;
+  /** Exponential backoff on repeated login failures (avoids hammering Cloudflare). */
+  private loginFailureCount = 0;
+  private loginBackoffUntil = 0;
+  private static readonly LOGIN_BACKOFF_STEPS_MS = [30_000, 60_000, 120_000, 300_000]; // 30s → 5min
+
+  /** Global throttle for Angel One requests — keeps us under Cloudflare WAF limits.
+   *  Tuned for ~8 req/sec sustained, well under Cloudflare's typical bot threshold. */
+  private static readonly MAX_CONCURRENT_REQUESTS = 2;
+  private static readonly MIN_REQUEST_SPACING_MS = 250;
+  private activeRequests = 0;
+  private lastRequestStartMs = 0;
+  private requestWaiters: Array<() => void> = [];
+
+  private async acquireRequestSlot(): Promise<void> {
+    while (this.activeRequests >= AngelOneDataSource.MAX_CONCURRENT_REQUESTS) {
+      await new Promise<void>((resolve) => this.requestWaiters.push(resolve));
+    }
+    this.activeRequests += 1;
+    const since = Date.now() - this.lastRequestStartMs;
+    if (since < AngelOneDataSource.MIN_REQUEST_SPACING_MS) {
+      await new Promise((r) => setTimeout(r, AngelOneDataSource.MIN_REQUEST_SPACING_MS - since));
+    }
+    this.lastRequestStartMs = Date.now();
+  }
+
+  private releaseRequestSlot(): void {
+    this.activeRequests = Math.max(0, this.activeRequests - 1);
+    const next = this.requestWaiters.shift();
+    if (next) next();
+  }
+
+  /**
+   * All Angel One API fetches go through here so a concurrent burst of poll
+   * timers can't stampede Cloudflare. The scrip-master bulk download uses
+   * raw fetch since it hits a different CDN host.
+   */
+  private async throttledFetch(url: string, init?: RequestInit): Promise<Response> {
+    await this.acquireRequestSlot();
+    try {
+      return await fetch(url, init);
+    } finally {
+      this.releaseRequestSlot();
+    }
+  }
 
   constructor() {
     this.apiKey = process.env.ANGEL_API_KEY || '';
@@ -148,7 +192,25 @@ export class AngelOneDataSource {
     return h;
   }
 
+  private noteLoginFailure(): void {
+    this.loginFailureCount += 1;
+    const idx = Math.min(this.loginFailureCount - 1, AngelOneDataSource.LOGIN_BACKOFF_STEPS_MS.length - 1);
+    const delay = AngelOneDataSource.LOGIN_BACKOFF_STEPS_MS[idx];
+    this.loginBackoffUntil = Date.now() + delay;
+    console.warn(`⏳ Angel One: backing off login retries for ${Math.round(delay / 1000)}s (failure #${this.loginFailureCount})`);
+  }
+
+  private noteLoginSuccess(): void {
+    this.loginFailureCount = 0;
+    this.loginBackoffUntil = 0;
+  }
+
   private async login(): Promise<boolean> {
+    // Don't hammer the auth server during a backoff window
+    if (Date.now() < this.loginBackoffUntil) {
+      return false;
+    }
+
     const totp = generateTOTP(this.totpSecret);
     const body = {
       clientcode: this.clientCode,
@@ -156,7 +218,7 @@ export class AngelOneDataSource {
       totp,
     };
     try {
-      const res = await fetch(`${ANGEL_BASE}/rest/auth/angelbroking/user/v1/loginByPassword`, {
+      const res = await this.throttledFetch(`${ANGEL_BASE}/rest/auth/angelbroking/user/v1/loginByPassword`, {
         method: 'POST',
         headers: this.getHeaders(false),
         body: JSON.stringify(body),
@@ -164,10 +226,12 @@ export class AngelOneDataSource {
       const raw = await res.text();
       if (typeof raw !== 'string' || raw.length === 0) {
         console.error('❌ Angel One login: empty response');
+        this.noteLoginFailure();
         return false;
       }
       if (raw.startsWith('Access den') || raw.startsWith('<') || raw.includes('Access Denied')) {
         console.error('❌ Angel One login: Access denied or HTML response (auth server)');
+        this.noteLoginFailure();
         return false;
       }
       let json: { status: boolean; data?: { jwtToken: string; refreshToken: string; feedToken: string } };
@@ -175,10 +239,12 @@ export class AngelOneDataSource {
         json = JSON.parse(raw);
       } catch (e: any) {
         console.error('❌ Angel One login error:', e?.message || e);
+        this.noteLoginFailure();
         return false;
       }
       if (!json.status || !json.data?.jwtToken) {
         console.error('❌ Angel One login failed:', (json as any).message || res.status);
+        this.noteLoginFailure();
         return false;
       }
       this.session = {
@@ -187,10 +253,12 @@ export class AngelOneDataSource {
         feedToken: json.data.feedToken,
         expiresAt: Date.now() + 23 * 60 * 60 * 1000, // ~1 day
       };
+      this.noteLoginSuccess();
       console.log('✅ Angel One session started');
       return true;
     } catch (e: any) {
       console.error('❌ Angel One login error:', e?.message || e);
+      this.noteLoginFailure();
       return false;
     }
   }
@@ -220,7 +288,7 @@ export class AngelOneDataSource {
   private async refreshToken(): Promise<boolean> {
     if (!this.session?.refreshToken) return this.login();
     try {
-      const res = await fetch(`${ANGEL_BASE}/rest/auth/angelbroking/jwt/v1/generateTokens`, {
+      const res = await this.throttledFetch(`${ANGEL_BASE}/rest/auth/angelbroking/jwt/v1/generateTokens`, {
         method: 'POST',
         headers: {
           ...this.getHeaders(true),
@@ -262,7 +330,7 @@ export class AngelOneDataSource {
    */
   private async searchScripApi(exchange: string, searchscrip: string): Promise<{ status: boolean; data?: Array<{ symboltoken: string; tradingsymbol: string }>; message?: string }> {
     const path = '/rest/secure/angelbroking/order/v1/searchScrip';
-    const res = await fetch(`${ANGEL_BASE}${path}`, {
+    const res = await this.throttledFetch(`${ANGEL_BASE}${path}`, {
       method: 'POST',
       headers: this.getHeaders(true),
       body: JSON.stringify({ exchange, searchscrip }),
@@ -596,7 +664,7 @@ export class AngelOneDataSource {
     const MAX_RATE_LIMIT_RETRIES = 3;
     for (let attempt = 0; attempt <= MAX_RATE_LIMIT_RETRIES; attempt++) {
       try {
-        const res = await fetch(`${ANGEL_BASE}/rest/secure/angelbroking/historical/v1/getCandleData`, {
+        const res = await this.throttledFetch(`${ANGEL_BASE}/rest/secure/angelbroking/historical/v1/getCandleData`, {
           method: 'POST',
           headers: this.getHeaders(true),
           body: JSON.stringify({
@@ -685,7 +753,7 @@ export class AngelOneDataSource {
     const MAX_RATE_LIMIT_RETRIES = 3;
     for (let attempt = 0; attempt <= MAX_RATE_LIMIT_RETRIES; attempt++) {
       try {
-        const res = await fetch(`${ANGEL_BASE}/rest/secure/angelbroking/order/v1/getLtpData`, {
+        const res = await this.throttledFetch(`${ANGEL_BASE}/rest/secure/angelbroking/order/v1/getLtpData`, {
           method: 'POST',
           headers: this.getHeaders(true),
           body: JSON.stringify({
@@ -822,7 +890,7 @@ export class AngelOneDataSource {
     if (bse.length) body.exchangeTokens['BSE'] = bse;
     if (nfo.length) body.exchangeTokens['NFO'] = nfo;
     try {
-      const res = await fetch(`${ANGEL_BASE}/rest/secure/angelbroking/margin/v1/batch`, {
+      const res = await this.throttledFetch(`${ANGEL_BASE}/rest/secure/angelbroking/margin/v1/batch`, {
         method: 'POST',
         headers: this.getHeaders(true),
         body: JSON.stringify(body),
