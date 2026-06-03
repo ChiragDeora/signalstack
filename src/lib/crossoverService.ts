@@ -23,7 +23,6 @@ import { getClerkUserEmail } from './clerkUserEmail';
 import { buildCrossoverChartAttachment } from './alertChart';
 import { appendAlertLog } from './alertLogger';
 import { CandleData } from './types';
-import { removeWatch as removeWatchFromDb } from './watchPersistence';
 // marketHours removed — alerts now fire regardless of trading hours
 
 // web-push is optional — only needed for push notifications (see OpenReplay Web Push guide)
@@ -74,10 +73,8 @@ export class CrossoverService {
   private lastAlertByPairAndCandle: Map<string, string> = new Map();
   /** Per-RSI-signal, per-candle de-duplication: key = userId|symbol|timeframe|signalType|direction, value = last alert timestamp */
   private lastRsiAlertByKey: Map<string, string> = new Map();
-  /** Consecutive null/empty-data poll responses per watch — drives auto-disable for dead symbols. */
+  /** Consecutive null/empty-data poll responses per watch — used only for periodic warning logs. */
   private nullPollStreak: Map<string, number> = new Map();
-  /** After this many consecutive empty responses, stop polling (likely expired/delisted symbol). */
-  private static readonly DEAD_SYMBOL_THRESHOLD = 5;
 
   constructor(io: any, options?: { onSubscriptionExpired?: OnSubscriptionExpired }) {
     this.io = io;
@@ -189,11 +186,15 @@ export class CrossoverService {
    */
   async restoreAllWatches(configs: WatchConfig[]): Promise<void> {
     if (!configs?.length) return;
-    console.log(`📂 Restoring ${configs.length} persisted watch(es) (staggered, 2s apart)...`);
+    console.log(`📂 Restoring ${configs.length} persisted watch(es) (staggered, 250ms apart)...`);
+    // The 2s stagger was needed before the global request throttle existed.
+    // The throttle (2 concurrent + 250ms spacing) now handles burst protection,
+    // so we only need a tiny gap between starts to avoid scheduling all warmups
+    // at exactly the same instant. 250ms × 20 watches = 5s startup instead of 40s.
     for (let i = 0; i < configs.length; i++) {
       const config = configs[i];
       if (i > 0) {
-        await new Promise((r) => setTimeout(r, 2000));
+        await new Promise((r) => setTimeout(r, 250));
       }
       try {
         const result = await this.startMonitoring(config);
@@ -267,29 +268,16 @@ export class CrossoverService {
     try {
       const priceData = await this.dataSource.fetchTimeframeData(config.symbol, config.timeframe, (config.exchange as 'NSE' | 'NFO' | 'BSE') || 'NSE');
       if (!priceData) {
-        // Track consecutive empty responses. If this symbol consistently returns
-        // nothing, it's likely expired/delisted — stop polling to free up the
-        // Angel One rate-limit budget.
+        // Track consecutive empty responses for logging only. We no longer
+        // auto-disable / delete dead watches — the user explicitly trusts
+        // their watchlist and prefers to manage it themselves. Persistent
+        // failures will only log a warning every 10 misses.
         const streak = (this.nullPollStreak.get(watchKey) ?? 0) + 1;
         this.nullPollStreak.set(watchKey, streak);
-        if (streak >= CrossoverService.DEAD_SYMBOL_THRESHOLD) {
+        if (streak === 10 || (streak > 10 && streak % 50 === 0)) {
           console.warn(
-            `🛑 Auto-disabling watch ${config.symbol} (${config.timeframe}): ${streak} consecutive empty responses (likely expired/delisted)`,
+            `⚠️  ${config.symbol} (${config.timeframe}): ${streak} consecutive empty responses from Angel One — will keep retrying`,
           );
-          this.emitStatus(
-            config.symbol,
-            config.timeframe,
-            'error',
-            'No data from data source — auto-stopped and removed. Symbol may be expired or delisted.',
-            config.userId,
-          );
-          await this.stopMonitoring(config.symbol, config.timeframe, config.userId);
-          // Also remove from Supabase so it doesn't come back on next server restart
-          if (config.userId) {
-            await removeWatchFromDb(config.userId, config.symbol, config.timeframe).catch((e) =>
-              console.warn(`Failed to delete dead watch ${config.symbol} from DB:`, e?.message),
-            );
-          }
         }
         return;
       }

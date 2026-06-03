@@ -231,9 +231,30 @@ export default function EMAAlertSystem() {
   const [symbols, setSymbols] = useState<MonitoredSymbol[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
   const [timeframeBySymbol, setTimeframeBySymbol] = useState<Record<string, string>>({});
-  const [priceByKey, setPriceByKey] = useState<Record<string, { price: number; change: number; changePercent: number; currency: string; source: string; lastUpdate: Date | null }>>({});
+  // Lazy initializer pulls cached prices from localStorage so the UI shows
+  // last-seen values instantly on page load (instead of staying blank during
+  // the ~15s server-side warmup). Fresh socket updates overwrite them.
+  const [priceByKey, setPriceByKey] = useState<Record<string, { price: number; change: number; changePercent: number; currency: string; source: string; lastUpdate: Date | null }>>(() => {
+    if (typeof window === 'undefined') return {};
+    try {
+      const raw = window.localStorage.getItem('signalstack:priceByKey');
+      if (!raw) return {};
+      const parsed = JSON.parse(raw) as Record<string, { price: number; change: number; changePercent: number; currency: string; source: string; lastUpdate: string | null }>;
+      const restored: Record<string, { price: number; change: number; changePercent: number; currency: string; source: string; lastUpdate: Date | null }> = {};
+      for (const [k, v] of Object.entries(parsed)) {
+        restored[k] = { ...v, lastUpdate: v.lastUpdate ? new Date(v.lastUpdate) : null };
+      }
+      return restored;
+    } catch { return {}; }
+  });
   const [priceErrorByKey, setPriceErrorByKey] = useState<Record<string, string>>({});
-  const [emaByKey, setEmaByKey] = useState<Record<string, Record<number, number | null>>>({});
+  const [emaByKey, setEmaByKey] = useState<Record<string, Record<number, number | null>>>(() => {
+    if (typeof window === 'undefined') return {};
+    try {
+      const raw = window.localStorage.getItem('signalstack:emaByKey');
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
+  });
   const [warmupByKey, setWarmupByKey] = useState<Record<string, Record<number, number>>>({});
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
@@ -243,7 +264,13 @@ export default function EMAAlertSystem() {
   const [emasBySymbol, setEmasBySymbol] = useState<Record<string, EMA[]>>({});
   const [rsiBySymbol, setRsiBySymbol] = useState<Record<string, RsiUiConfig>>({});
   const [emaEnabledBySymbol, setEmaEnabledBySymbol] = useState<Record<string, boolean>>({});
-  const [rsiByKey, setRsiByKey] = useState<Record<string, RsiLive>>({});
+  const [rsiByKey, setRsiByKey] = useState<Record<string, RsiLive>>(() => {
+    if (typeof window === 'undefined') return {};
+    try {
+      const raw = window.localStorage.getItem('signalstack:rsiByKey');
+      return raw ? JSON.parse(raw) : {};
+    } catch { return {}; }
+  });
   const [rsiAlerts, setRsiAlerts] = useState<RsiAlertData[]>([]);
   const [rsiFormError, setRsiFormError] = useState<string | null>(null);
   const [showAddEma, setShowAddEma] = useState(false);
@@ -314,6 +341,23 @@ export default function EMAAlertSystem() {
   }, [displaySymbol]);
 
   useEffect(() => { setMounted(true); }, []);
+
+  // Persist priceByKey / emaByKey / rsiByKey to localStorage so the next page
+  // load shows last-seen values instantly (instead of going blank during the
+  // ~15s server-side warmup). Debounced to avoid storage thrash.
+  const cachePersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    if (!mounted) return;
+    if (cachePersistTimerRef.current) clearTimeout(cachePersistTimerRef.current);
+    cachePersistTimerRef.current = setTimeout(() => {
+      try {
+        window.localStorage.setItem('signalstack:priceByKey', JSON.stringify(priceByKey));
+        window.localStorage.setItem('signalstack:emaByKey', JSON.stringify(emaByKey));
+        window.localStorage.setItem('signalstack:rsiByKey', JSON.stringify(rsiByKey));
+      } catch { /* quota or disabled */ }
+    }, 500);
+    return () => { if (cachePersistTimerRef.current) clearTimeout(cachePersistTimerRef.current); };
+  }, [mounted, priceByKey, emaByKey, rsiByKey]);
 
   // Refresh modal: show on load, hide when connected and monitoring ready (min 1.5s), or after 4s max
   useEffect(() => {

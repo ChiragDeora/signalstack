@@ -1006,6 +1006,15 @@ export class AngelOneDataSource {
         BSE: fallbackAll.filter((r) => r.exchange === 'BSE'),
       };
 
+      // Build a canonical-name lookup from the scrip master fallback so we can
+      // override the API's casing for NSE non-EQ symbols (the API sometimes
+      // returns "NIFTY 50" but the scrip master has the authoritative
+      // "Nifty 50" — and Angel One's getCandleData only accepts the latter).
+      const nseCanonicalByUpper = new Map<string, string>();
+      for (const r of fallbackByExchange.NSE) {
+        nseCanonicalByUpper.set(r.symbol.toUpperCase(), r.symbol);
+      }
+
       // NSE: equity (-EQ) first, then indices/other; if API failed, use scrip master so we never skip
       if (nseRes?.status && Array.isArray(nseRes.data)) {
         for (const r of nseRes.data) {
@@ -1027,12 +1036,16 @@ export class AngelOneDataSource {
         }
         for (const r of nseRes.data) {
           if (!r.tradingsymbol || r.tradingsymbol.endsWith('-EQ')) continue;
-          const key = `NSE:${r.tradingsymbol}-${r.symboltoken ?? ''}`;
+          // Canonicalize casing using the scrip master (e.g. "NIFTY 50" → "Nifty 50").
+          // Without this, Angel One's getCandleData returns "symbol not found".
+          const apiSym = r.tradingsymbol;
+          const canonical = nseCanonicalByUpper.get(apiSym.toUpperCase()) ?? apiSym;
+          const key = `NSE:${canonical}-${r.symboltoken ?? ''}`;
           if (seen.has(key)) continue;
           seen.add(key);
           results.push({
-            symbol: r.tradingsymbol,
-            name: `${r.tradingsymbol} (NSE)`,
+            symbol: canonical,
+            name: `${canonical} (NSE)`,
             exchange: 'NSE',
             currency: 'INR',
             country: 'India',
