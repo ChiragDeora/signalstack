@@ -1,10 +1,12 @@
 import type { Metadata, Viewport } from 'next';
-import { Inter } from 'next/font/google';
+import { Space_Grotesk, DM_Sans, JetBrains_Mono } from 'next/font/google';
 import { ClerkProvider } from '@clerk/nextjs';
 import './globals.css';
 import { ServiceWorkerRegistration } from '@/components/ServiceWorkerRegistration';
 
-const inter = Inter({ subsets: ['latin'] });
+const fontDisplay = Space_Grotesk({ subsets: ['latin'], variable: '--font-display' });
+const fontBody = DM_Sans({ subsets: ['latin'], variable: '--font-body' });
+const fontMono = JetBrains_Mono({ subsets: ['latin'], variable: '--font-mono' });
 
 export const metadata: Metadata = {
   title: 'SignalStack',
@@ -42,7 +44,7 @@ export default function RootLayout({
           <meta name="apple-mobile-web-app-title" content="SignalStack" />
           <meta name="mobile-web-app-capable" content="yes" />
         </head>
-        <body className={inter.className}>
+        <body className={`${fontDisplay.variable} ${fontBody.variable} ${fontMono.variable} ${fontBody.className}`}>
           {children}
           <ServiceWorkerRegistration />
         </body>

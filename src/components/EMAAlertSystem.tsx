@@ -1,252 +1,121 @@
 'use client';
 
+/* ============================================================
+   SignalStack — EMAAlertSystem (redesigned UI)
+   Drop-in replacement for src/components/EMAAlertSystem.tsx
+   Same data layer (Socket.IO, Angel One fetch, monitor/push/email
+   APIs, Supabase persistence) as the original — new presentation:
+   selected-symbol spotlight, watchlist, indicators config, search
+   sheet, even bottom nav, light/dark.
+   ============================================================ */
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import {
-  Bell, Plus, TrendingUp, TrendingDown,
-  Target, Search, Trash2, BarChart3, Zap,
-  ArrowRight, Activity, Power, Wifi, WifiOff, RefreshCw, X, Pencil, Check, Mail, Download,
-  Settings, ChevronDown, Sparkles,
-} from 'lucide-react';
 import { UserButton, useUser } from '@clerk/nextjs';
 import axios from 'axios';
 import { io, Socket } from 'socket.io-client';
+import {
+  Moon, Sun, Bell, X, Plus, Check, ChevronRight, Power, Zap, Layers, Activity,
+  TrendingUp, TrendingDown, Search, Mail, Download, Sparkles, RefreshCw, Settings, Trash2,
+} from 'lucide-react';
+import {
+  Spotlight, WatchRow, BottomNav, RsiMeter, LivePill, DirTag, optionMeta, TodayAlerts,
+  type TodayAlertItem,
+} from './signalstack-ui';
 
-interface MonitoredWatch {
-  symbol: string;
-  timeframe: string;
-  emaPeriods: number[];
-  trackBullish: boolean;
-  trackBearish: boolean;
-  exchange: string;
-  currency: string;
-  rsi?: RsiPayload;
-}
+/* ---------- Types ---------- */
+interface RsiSignalFlags { overboughtCross: boolean; oversoldCross: boolean; thresholdBreach: boolean; centerlineCross: boolean; signalLineCross: boolean; }
+interface RsiPayload { enabled: boolean; period: number; overbought: number; oversold: number; signalLineLength?: number; signals: RsiSignalFlags; }
+interface RsiUiConfig { enabled: boolean; period: string; overbought: string; oversold: string; signalLineLength: string; signals: RsiSignalFlags; }
+interface RsiLive { value: number | null; period: number; warmupProgress: number; }
+interface MonitoredWatch { symbol: string; timeframe: string; emaPeriods: number[]; trackBullish: boolean; trackBearish: boolean; exchange: string; currency: string; rsi?: RsiPayload; }
+interface EMA { id: number; period: number; color: string; }
+interface MonitoredSymbol { symbol: string; name?: string; currency: string; exchange?: string; }
+interface AlertData { id: string; symbol: string; timeframe: string; fastPeriod: number; slowPeriod: number; fastEmaValue: number; slowEmaValue: number; crossoverType: 'bullish' | 'bearish'; price: number; currency: string; timestamp: string; source: string; }
+interface RsiAlertData { id: string; type: 'rsi'; symbol: string; timeframe: string; signalType: 'overboughtCross' | 'oversoldCross' | 'thresholdBreach' | 'centerlineCross'; direction: 'bullish' | 'bearish'; rsiValue: number; previousRsi: number; period: number; overbought: number; oversold: number; price: number; currency: string; timestamp: string; source: string; }
+interface SearchResult { symbol: string; name: string; exchange: string; currency: string; type: string; }
 
-interface RsiSignalFlags {
-  overboughtCross: boolean;
-  oversoldCross: boolean;
-  thresholdBreach: boolean;
-  centerlineCross: boolean;
-  signalLineCross: boolean;
-}
-
-/** Server-side RSI config (numeric, validated). */
-interface RsiPayload {
-  enabled: boolean;
-  period: number;
-  overbought: number;
-  oversold: number;
-  signalLineLength?: number;
-  signals: RsiSignalFlags;
-}
-
-/** UI form state for RSI. Strings allow empty inputs without forcing defaults. */
-interface RsiUiConfig {
-  enabled: boolean;
-  period: string;
-  overbought: string;
-  oversold: string;
-  signalLineLength: string;
-  signals: RsiSignalFlags;
-}
-
-const RSI_DEFAULTS = {
-  period: '14',
-  overbought: '70',
-  oversold: '30',
-  signalLineLength: '14',
-};
-
-const DEFAULT_RSI_SIGNALS: RsiSignalFlags = {
-  overboughtCross: false,
-  oversoldCross: false,
-  thresholdBreach: false,
-  centerlineCross: false,
-  signalLineCross: true,
-};
-
-/** Signal line cross first in the alerts list. */
-const RSI_SIGNAL_ORDER: Array<keyof RsiSignalFlags> = [
-  'signalLineCross',
-  'overboughtCross',
-  'oversoldCross',
-  'thresholdBreach',
-  'centerlineCross',
-];
-
-const EMPTY_RSI_UI: RsiUiConfig = {
-  enabled: false,
-  period: RSI_DEFAULTS.period,
-  overbought: RSI_DEFAULTS.overbought,
-  oversold: RSI_DEFAULTS.oversold,
-  signalLineLength: RSI_DEFAULTS.signalLineLength,
-  signals: { overboughtCross: false, oversoldCross: false, thresholdBreach: false, centerlineCross: false, signalLineCross: false },
-};
-
-interface RsiLive {
-  value: number | null;
-  period: number;
-  warmupProgress: number;
-}
-
-interface RsiAlertData {
-  id: string;
-  type: 'rsi';
-  symbol: string;
-  timeframe: string;
-  signalType: 'overboughtCross' | 'oversoldCross' | 'thresholdBreach' | 'centerlineCross';
-  direction: 'bullish' | 'bearish';
-  rsiValue: number;
-  previousRsi: number;
-  period: number;
-  overbought: number;
-  oversold: number;
-  price: number;
-  currency: string;
-  timestamp: string;
-  source: string;
-}
-
-const RSI_SIGNAL_LABELS: Record<keyof RsiSignalFlags, string> = {
-  overboughtCross: 'Overbought cross',
-  oversoldCross: 'Oversold cross',
-  thresholdBreach: 'Threshold breach',
-  centerlineCross: 'Centerline cross',
-  signalLineCross: 'Signal line cross',
-};
-
-/** Verbose labels used only in the configuration form (not the alert list). */
+const RSI_DEFAULTS = { period: '14', overbought: '70', oversold: '30', signalLineLength: '14' };
+const DEFAULT_RSI_SIGNALS: RsiSignalFlags = { overboughtCross: false, oversoldCross: false, thresholdBreach: false, centerlineCross: false, signalLineCross: true };
+const EMPTY_RSI_UI: RsiUiConfig = { enabled: false, ...RSI_DEFAULTS, signals: { overboughtCross: false, oversoldCross: false, thresholdBreach: false, centerlineCross: false, signalLineCross: false } };
 const RSI_SIGNAL_LABELS_LONG: Record<keyof RsiSignalFlags, string> = {
-  overboughtCross: 'Overbought cross (bearish)',
-  oversoldCross: 'Oversold cross (bullish)',
-  thresholdBreach: 'Threshold breach',
-  centerlineCross: 'Centerline (50) cross',
-  signalLineCross: 'Signal line cross (RSI vs its EMA)',
+  overboughtCross: 'Overbought cross (bearish)', oversoldCross: 'Oversold cross (bullish)',
+  thresholdBreach: 'Threshold breach', centerlineCross: 'Centerline (50) cross', signalLineCross: 'Signal line cross',
 };
+const RSI_SIGNAL_LABELS: Record<keyof RsiSignalFlags, string> = {
+  overboughtCross: 'Overbought cross', oversoldCross: 'Oversold cross',
+  thresholdBreach: 'Threshold breach', centerlineCross: 'Centerline cross', signalLineCross: 'Signal line cross',
+};
+const RSI_SIGNAL_ORDER: Array<keyof RsiSignalFlags> = ['signalLineCross', 'overboughtCross', 'oversoldCross', 'centerlineCross'];
 
-/** Validate UI inputs and produce the server payload. */
 function buildRsiPayload(ui: RsiUiConfig): { ok: true; rsi?: RsiPayload } | { ok: false; error: string } {
   if (!ui.enabled) return { ok: true };
   const period = parseInt(ui.period.trim() || RSI_DEFAULTS.period, 10);
   const overbought = parseFloat(ui.overbought.trim() || RSI_DEFAULTS.overbought);
   const oversold = parseFloat(ui.oversold.trim() || RSI_DEFAULTS.oversold);
-  if (!Number.isFinite(period) || period < 2 || period > 200) {
-    return { ok: false, error: 'RSI period must be a number between 2 and 200' };
-  }
-  if (!Number.isFinite(overbought) || overbought <= 50 || overbought > 100) {
-    return { ok: false, error: 'Overbought must be a number between 51 and 100' };
-  }
-  if (!Number.isFinite(oversold) || oversold < 0 || oversold >= 50) {
-    return { ok: false, error: 'Oversold must be a number between 0 and 49' };
-  }
-  if (!Object.values(ui.signals).some(Boolean)) {
-    return { ok: false, error: 'Pick at least one RSI signal to track' };
-  }
+  if (!Number.isFinite(period) || period < 2 || period > 200) return { ok: false, error: 'RSI period must be between 2 and 200' };
+  if (!Number.isFinite(overbought) || overbought <= 50 || overbought > 100) return { ok: false, error: 'Overbought must be 51–100' };
+  if (!Number.isFinite(oversold) || oversold < 0 || oversold >= 50) return { ok: false, error: 'Oversold must be 0–49' };
+  if (!Object.values(ui.signals).some(Boolean)) return { ok: false, error: 'Pick at least one RSI signal' };
   const payload: RsiPayload = { enabled: true, period, overbought, oversold, signals: ui.signals };
   if (ui.signals.signalLineCross) {
     const sigLen = parseInt(ui.signalLineLength.trim() || RSI_DEFAULTS.signalLineLength, 10);
-    if (!Number.isFinite(sigLen) || sigLen < 2 || sigLen > 200) {
-      return { ok: false, error: 'Signal line EMA length must be a number between 2 and 200' };
-    }
+    if (!Number.isFinite(sigLen) || sigLen < 2 || sigLen > 200) return { ok: false, error: 'Signal line EMA length must be 2–200' };
     payload.signalLineLength = sigLen;
   }
   return { ok: true, rsi: payload };
 }
-
 function rsiPayloadToUi(p: RsiPayload | undefined): RsiUiConfig {
   if (!p || !p.enabled) return EMPTY_RSI_UI;
-  return {
-    enabled: true,
-    period: String(p.period),
-    overbought: String(p.overbought),
-    oversold: String(p.oversold),
-    signalLineLength: p.signalLineLength != null ? String(p.signalLineLength) : RSI_DEFAULTS.signalLineLength,
-    signals: { ...p.signals },
-  };
+  return { enabled: true, period: String(p.period), overbought: String(p.overbought), oversold: String(p.oversold),
+    signalLineLength: p.signalLineLength != null ? String(p.signalLineLength) : RSI_DEFAULTS.signalLineLength, signals: { ...p.signals } };
+}
+function watchKey(symbol: string, timeframe: string) { return `${symbol.toUpperCase()}:${timeframe}`; }
+
+/** Local calendar day (browser timezone). */
+function isTodayTimestamp(iso: string): boolean {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return false;
+  const now = new Date();
+  return d.getFullYear() === now.getFullYear()
+    && d.getMonth() === now.getMonth()
+    && d.getDate() === now.getDate();
 }
 
-// ===================================
-// TYPES
-// ===================================
-interface EMA {
-  id: number;
-  period: number;
-  color: string;
-}
-
-interface MonitoredSymbol {
-  symbol: string;
-  name?: string;
-  currency: string;
-  exchange?: string; // NSE | NFO | BSE — used for polling/fetch so the correct exchange is queried
-}
-
-interface AlertData {
-  id: string;
-  symbol: string;
-  timeframe: string;
-  fastPeriod: number;
-  slowPeriod: number;
-  fastEmaValue: number;
-  slowEmaValue: number;
-  crossoverType: 'bullish' | 'bearish';
-  price: number;
-  currency: string;
-  timestamp: string;
-  source: string;
-}
-
-interface SearchResult {
-  symbol: string;
-  name: string;
-  exchange: string;
-  currency: string;
-  type: string;
-}
-
-function watchKey(symbol: string, timeframe: string) {
-  return `${symbol.toUpperCase()}:${timeframe}`;
-}
-
-const TIMEFRAMES = [
-  { id: '1m', label: '1m' },
-  { id: '5m', label: '5m' },
-  { id: '15m', label: '15m' },
-  { id: '30m', label: '30m' },
-  { id: '1h', label: '1h' },
-  { id: '4h', label: '4h' },
-  { id: '1d', label: '1D' },
-];
-
-const COLORS = [
-  '#10b981', '#3b82f6', '#f59e0b', '#ef4444', '#8b5cf6',
-  '#06b6d4', '#f97316', '#84cc16', '#ec4899', '#6366f1',
-];
-
+const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
+const COLORS = ['#1f6dff', '#0bb5d6', '#8b5cf6', '#f59e0b', '#ec4899', '#10b981', '#06b6d4', '#84cc16', '#f97316', '#6366f1'];
 const DEFAULT_TIMEFRAME = '5m';
+
+type PriceInfo = { price: number; change: number; changePercent: number; currency: string; source: string; lastUpdate: Date | null };
+type Flash = '' | 'flash-up' | 'flash-down';
 
 export default function EMAAlertSystem() {
   const socketRef = useRef<Socket | null>(null);
   const [connected, setConnected] = useState(false);
+  const [mounted, setMounted] = useState(false);
+  const [tab, setTab] = useState<'live' | 'config'>('live');
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [showTools, setShowTools] = useState(false);
+  const [dark, setDark] = useState(false);
+
   const [symbols, setSymbols] = useState<MonitoredSymbol[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
   const [timeframeBySymbol, setTimeframeBySymbol] = useState<Record<string, string>>({});
-  // Lazy initializer pulls cached prices from localStorage so the UI shows
-  // last-seen values instantly on page load (instead of staying blank during
-  // the ~15s server-side warmup). Fresh socket updates overwrite them.
-  const [priceByKey, setPriceByKey] = useState<Record<string, { price: number; change: number; changePercent: number; currency: string; source: string; lastUpdate: Date | null }>>(() => {
+  // Lazy initializers pull last-seen values from localStorage so the UI shows
+  // prices/RSI/EMA instantly on page load (instead of going blank for ~15s
+  // during the server-side warmup). Fresh socket updates overwrite them.
+  const [priceByKey, setPriceByKey] = useState<Record<string, PriceInfo>>(() => {
     if (typeof window === 'undefined') return {};
     try {
       const raw = window.localStorage.getItem('signalstack:priceByKey');
       if (!raw) return {};
-      const parsed = JSON.parse(raw) as Record<string, { price: number; change: number; changePercent: number; currency: string; source: string; lastUpdate: string | null }>;
-      const restored: Record<string, { price: number; change: number; changePercent: number; currency: string; source: string; lastUpdate: Date | null }> = {};
+      const parsed = JSON.parse(raw) as Record<string, PriceInfo & { lastUpdate: string | null | undefined }>;
+      const restored: Record<string, PriceInfo> = {};
       for (const [k, v] of Object.entries(parsed)) {
-        restored[k] = { ...v, lastUpdate: v.lastUpdate ? new Date(v.lastUpdate) : null };
+        restored[k] = { ...(v as PriceInfo), lastUpdate: v.lastUpdate ? new Date(v.lastUpdate) : null };
       }
       return restored;
     } catch { return {}; }
   });
+  const [flashByKey, setFlashByKey] = useState<Record<string, Flash>>({});
   const [priceErrorByKey, setPriceErrorByKey] = useState<Record<string, string>>({});
   const [emaByKey, setEmaByKey] = useState<Record<string, Record<number, number | null>>>(() => {
     if (typeof window === 'undefined') return {};
@@ -256,14 +125,6 @@ export default function EMAAlertSystem() {
     } catch { return {}; }
   });
   const [warmupByKey, setWarmupByKey] = useState<Record<string, Record<number, number>>>({});
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
-  const [searchExchangeFilter, setSearchExchangeFilter] = useState<'ALL' | 'NSE' | 'NFO' | 'BSE'>('ALL');
-  const [showSearch, setShowSearch] = useState(false);
-  const [isSearching, setIsSearching] = useState(false);
-  const [emasBySymbol, setEmasBySymbol] = useState<Record<string, EMA[]>>({});
-  const [rsiBySymbol, setRsiBySymbol] = useState<Record<string, RsiUiConfig>>({});
-  const [emaEnabledBySymbol, setEmaEnabledBySymbol] = useState<Record<string, boolean>>({});
   const [rsiByKey, setRsiByKey] = useState<Record<string, RsiLive>>(() => {
     if (typeof window === 'undefined') return {};
     try {
@@ -271,80 +132,55 @@ export default function EMAAlertSystem() {
       return raw ? JSON.parse(raw) : {};
     } catch { return {}; }
   });
-  const [rsiAlerts, setRsiAlerts] = useState<RsiAlertData[]>([]);
-  const [rsiFormError, setRsiFormError] = useState<string | null>(null);
-  const [showAddEma, setShowAddEma] = useState(false);
-  const [newEmaPeriod, setNewEmaPeriod] = useState('');
-  const [monitoredSymbols, setMonitoredSymbols] = useState<Set<string>>(new Set());
-  const isMonitoring = monitoredSymbols.size > 0;
-  const [monitorStatus, setMonitorStatus] = useState('');
+  const [emasBySymbol, setEmasBySymbol] = useState<Record<string, EMA[]>>({});
+  const [rsiBySymbol, setRsiBySymbol] = useState<Record<string, RsiUiConfig>>({});
+  const [emaEnabledBySymbol, setEmaEnabledBySymbol] = useState<Record<string, boolean>>({});
   const [trackBullish, setTrackBullish] = useState(true);
   const [trackBearish, setTrackBearish] = useState(true);
+  const [monitoredSymbols, setMonitoredSymbols] = useState<Set<string>>(new Set());
+  const [monitorStatus, setMonitorStatus] = useState('');
+  const [monitoringBusy, setMonitoringBusy] = useState(false);
+  const [restoringWatches, setRestoringWatches] = useState(false);
+  const [newEmaPeriod, setNewEmaPeriod] = useState('');
+  const [rsiFormError, setRsiFormError] = useState<string | null>(null);
+
   const [alerts, setAlerts] = useState<AlertData[]>([]);
+  const [rsiAlerts, setRsiAlerts] = useState<RsiAlertData[]>([]);
   const [pushEnabled, setPushEnabled] = useState(false);
   const [pushAvailable, setPushAvailable] = useState<boolean | null>(null);
-  const [mounted, setMounted] = useState(false);
-  const [isFetchingPrice, setIsFetchingPrice] = useState(false);
-  const [editingPairIndex, setEditingPairIndex] = useState<number | null>(null);
-  const [editPairFast, setEditPairFast] = useState<number>(9);
-  const [editPairSlow, setEditPairSlow] = useState<number>(21);
-  const [showRefreshModal, setShowRefreshModal] = useState(true);
-  const [refreshModalMinTimeElapsed, setRefreshModalMinTimeElapsed] = useState(false);
-  const [showSearchMobile, setShowSearchMobile] = useState(true); // search panel visible by default on mobile
-  const [showEmaConfig, setShowEmaConfig] = useState(false); // collapsed on mobile by default
-  const [showSettings, setShowSettings] = useState(false); // header settings drawer
-  const [replacingSymbol, setReplacingSymbol] = useState<string | null>(null);
   const [testEmailStatus, setTestEmailStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle');
   const [testEmailMessage, setTestEmailMessage] = useState<string | null>(null);
   const [testPushStatus, setTestPushStatus] = useState<'idle' | 'sending' | 'success' | 'error'>('idle');
   const [testPushMessage, setTestPushMessage] = useState<string | null>(null);
   const [cleanupStatus, setCleanupStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle');
   const [cleanupMessage, setCleanupMessage] = useState<string | null>(null);
+
   const hasRestoredRef = useRef(false);
   const hasRestoredMonitoredRef = useRef(false);
-  const [monitoringBusy, setMonitoringBusy] = useState(false);
-  const [restoringWatches, setRestoringWatches] = useState(false);
   const { user: clerkUser } = useUser();
   const userId = clerkUser?.id ?? null;
-
-  const searchInputRef = useRef<HTMLInputElement>(null);
-  const searchContainerRef = useRef<HTMLDivElement>(null);
 
   const getTimeframe = (sym: string) => timeframeBySymbol[sym] ?? DEFAULT_TIMEFRAME;
   const displaySymbol = selectedSymbol ?? symbols[0]?.symbol ?? null;
   const displayTimeframe = displaySymbol ? getTimeframe(displaySymbol) : DEFAULT_TIMEFRAME;
-  const displayPrice = displaySymbol ? priceByKey[watchKey(displaySymbol, displayTimeframe)] : null;
-  const displayPriceError = displaySymbol ? priceErrorByKey[watchKey(displaySymbol, displayTimeframe)] : undefined;
-  const displayEmaValues = displaySymbol ? emaByKey[watchKey(displaySymbol, displayTimeframe)] ?? {} : {};
-  const displayWarmupProgress = displaySymbol ? warmupByKey[watchKey(displaySymbol, displayTimeframe)] ?? {} : {};
-  const _currency = displaySymbol ? (symbols.find((s) => s.symbol === displaySymbol)?.currency ?? 'INR') : 'INR';
-  const emas = useMemo(
-    () => (displaySymbol ? (emasBySymbol[displaySymbol] ?? []) : []),
-    [displaySymbol, emasBySymbol]
-  );
+  const displayKey = displaySymbol ? watchKey(displaySymbol, displayTimeframe) : '';
+  const displayPrice = displaySymbol ? priceByKey[displayKey] : undefined;
+  const displayPriceError = displaySymbol ? priceErrorByKey[displayKey] : undefined;
+  const displayEmaValues = displaySymbol ? emaByKey[displayKey] ?? {} : {};
+  const liveRsi = displaySymbol ? rsiByKey[displayKey] : undefined;
+  const emas = useMemo(() => (displaySymbol ? (emasBySymbol[displaySymbol] ?? []) : []), [displaySymbol, emasBySymbol]);
   const rsiUi = displaySymbol ? (rsiBySymbol[displaySymbol] ?? EMPTY_RSI_UI) : EMPTY_RSI_UI;
   const emaAlertsEnabled = displaySymbol ? (emaEnabledBySymbol[displaySymbol] ?? true) : true;
-  const liveRsi = displaySymbol ? rsiByKey[watchKey(displaySymbol, displayTimeframe)] : undefined;
-
-  const updateEmaEnabled = useCallback((enabled: boolean) => {
-    if (!displaySymbol) return;
-    setEmaEnabledBySymbol((prev) => ({ ...prev, [displaySymbol]: enabled }));
-  }, [displaySymbol]);
-
-  const updateRsi = useCallback((updater: (prev: RsiUiConfig) => RsiUiConfig) => {
-    if (!displaySymbol) return;
-    setRsiBySymbol((prev) => ({
-      ...prev,
-      [displaySymbol]: updater(prev[displaySymbol] ?? EMPTY_RSI_UI),
-    }));
-    setRsiFormError(null);
-  }, [displaySymbol]);
 
   useEffect(() => { setMounted(true); }, []);
 
-  // Persist priceByKey / emaByKey / rsiByKey to localStorage so the next page
-  // load shows last-seen values instantly (instead of going blank during the
-  // ~15s server-side warmup). Debounced to avoid storage thrash.
+  /* dark mode persistence */
+  useEffect(() => {
+    try { const v = localStorage.getItem('signalstack:dark'); if (v != null) setDark(v === '1'); } catch { /* ignore */ }
+  }, []);
+  useEffect(() => { if (mounted) { try { localStorage.setItem('signalstack:dark', dark ? '1' : '0'); } catch { /* ignore */ } } }, [mounted, dark]);
+
+  /* price/RSI/EMA cache persistence — debounced so we don't thrash storage */
   const cachePersistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (!mounted) return;
@@ -359,52 +195,49 @@ export default function EMAAlertSystem() {
     return () => { if (cachePersistTimerRef.current) clearTimeout(cachePersistTimerRef.current); };
   }, [mounted, priceByKey, emaByKey, rsiByKey]);
 
-  // Refresh modal: show on load, hide when connected and monitoring ready (min 1.5s), or after 4s max
-  useEffect(() => {
-    const minT = setTimeout(() => setRefreshModalMinTimeElapsed(true), 1500);
-    return () => { clearTimeout(minT); };
-  }, []);
-  useEffect(() => {
-    if (!refreshModalMinTimeElapsed) return;
-    const hasAnyPrice = Object.keys(priceByKey).length > 0;
-    if (hasAnyPrice || symbols.length === 0) {
-      setShowRefreshModal(false);
-    }
-  }, [refreshModalMinTimeElapsed, priceByKey, symbols.length]);
+  const getCurrencySymbol = (c: string) => ({ USD: '$', INR: '₹', GBP: '£', JPY: '¥', EUR: '€' } as Record<string, string>)[c] || c;
+  const getExchange = useCallback((sym: string): string => symbols.find((x) => x.symbol === sym)?.exchange || 'NSE', [symbols]);
 
-  // Check if push is configured on this deployment (e.g. Vercel returns 503 without VAPID env)
+  /* flash helper */
+  const flashTimers = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  const setFlash = useCallback((key: string, dir: Flash) => {
+    setFlashByKey((prev) => ({ ...prev, [key]: dir }));
+    if (flashTimers.current[key]) clearTimeout(flashTimers.current[key]);
+    flashTimers.current[key] = setTimeout(() => setFlashByKey((prev) => ({ ...prev, [key]: '' })), 620);
+  }, []);
+
+  const updateEmaEnabled = useCallback((enabled: boolean) => {
+    if (!displaySymbol) return;
+    setEmaEnabledBySymbol((prev) => ({ ...prev, [displaySymbol]: enabled }));
+  }, [displaySymbol]);
+  const updateRsi = useCallback((updater: (prev: RsiUiConfig) => RsiUiConfig) => {
+    if (!displaySymbol) return;
+    setRsiBySymbol((prev) => ({ ...prev, [displaySymbol]: updater(prev[displaySymbol] ?? EMPTY_RSI_UI) }));
+    setRsiFormError(null);
+  }, [displaySymbol]);
+
+  /* push availability + restore */
   useEffect(() => {
     if (!mounted) return;
-    axios.get<{ vapidConfigured?: boolean }>('/api/status')
-      .then((res) => setPushAvailable(!!res.data?.vapidConfigured))
-      .catch(() => setPushAvailable(false));
+    axios.get<{ vapidConfigured?: boolean }>('/api/status').then((r) => setPushAvailable(!!r.data?.vapidConfigured)).catch(() => setPushAvailable(false));
   }, [mounted]);
-
-  // Restore "Alerts on" if this browser already has a push subscription (e.g. after refresh)
   useEffect(() => {
     if (!mounted || !('serviceWorker' in navigator) || !('PushManager' in window)) return;
-    navigator.serviceWorker.ready
-      .then((reg) => reg.pushManager.getSubscription())
-      .then((sub) => sub != null && setPushEnabled(true))
-      .catch(() => { /* ignore */ });
+    navigator.serviceWorker.ready.then((reg) => reg.pushManager.getSubscription()).then((s) => s != null && setPushEnabled(true)).catch(() => { });
   }, [mounted]);
 
-  // Refetch watches from Supabase and set local state (call after start/stop monitor)
   const refetchWatches = useCallback(async () => {
     if (!userId) return;
     try {
       const res = await axios.get<{ success: boolean; watches?: MonitoredWatch[] }>('/api/user/watches');
-      if (res.data.success && Array.isArray(res.data.watches)) {
-        setMonitoredSymbols(new Set(res.data.watches.map((w) => w.symbol)));
-      }
+      if (res.data.success && Array.isArray(res.data.watches)) setMonitoredSymbols(new Set(res.data.watches.map((w) => w.symbol)));
     } catch { /* ignore */ }
   }, [userId]);
 
-  // Restore user config from Supabase once on mount (when signed in)
+  /* restore config */
   useEffect(() => {
     if (!mounted || !userId || hasRestoredRef.current) return;
-    axios
-      .get<{ success: boolean; config?: { symbols: MonitoredSymbol[]; timeframeBySymbol: Record<string, string>; emasBySymbol: Record<string, EMA[]>; trackBullish: boolean; trackBearish: boolean; selectedSymbol: string | null } }>('/api/user/config')
+    axios.get<{ success: boolean; config?: { symbols: MonitoredSymbol[]; timeframeBySymbol: Record<string, string>; emasBySymbol: Record<string, EMA[]>; trackBullish: boolean; trackBearish: boolean; selectedSymbol: string | null } }>('/api/user/config')
       .then((res) => {
         if (!res.data.success || !res.data.config) return;
         const c = res.data.config;
@@ -417,1149 +250,493 @@ export default function EMAAlertSystem() {
           setSelectedSymbol(c.selectedSymbol ?? c.symbols[0]?.symbol ?? null);
         }
       })
-      .catch((err: any) => {
-        console.error('[EMAAlertSystem] Load config failed:', err.response?.status, err.response?.data?.error ?? err.message);
-      })
-      .finally(() => {
-        hasRestoredRef.current = true;
-      });
+      .catch(() => { })
+      .finally(() => { hasRestoredRef.current = true; });
   }, [mounted, userId]);
 
-  // Persist config to Supabase when it changes (debounced to avoid excessive writes)
+  /* persist config */
   const configPersistRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    if (!mounted || !userId) return;
-    if (!hasRestoredRef.current) return;
+    if (!mounted || !userId || !hasRestoredRef.current) return;
     if (configPersistRef.current) clearTimeout(configPersistRef.current);
     configPersistRef.current = setTimeout(() => {
-      configPersistRef.current = null;
-      axios.put('/api/user/config', {
-        symbols,
-        timeframeBySymbol,
-        emasBySymbol,
-        trackBullish,
-        trackBearish,
-        selectedSymbol,
-      }).then(() => {
-        if (symbols.length > 0) console.log('[EMAAlertSystem] Config saved to Supabase, symbols:', symbols.length);
-      }).catch((err: any) => {
-        console.error('[EMAAlertSystem] Config save failed:', err.response?.status, err.response?.data?.error ?? err.message);
-      });
+      axios.put('/api/user/config', { symbols, timeframeBySymbol, emasBySymbol, trackBullish, trackBearish, selectedSymbol }).catch(() => { });
     }, 800);
     return () => { if (configPersistRef.current) clearTimeout(configPersistRef.current); };
   }, [mounted, userId, symbols, timeframeBySymbol, emasBySymbol, trackBullish, trackBearish, selectedSymbol]);
 
-  // Restore monitoring from Supabase and re-register with server (survives refresh / server restart)
+  /* restore monitoring */
   useEffect(() => {
     if (!mounted || !userId || hasRestoredMonitoredRef.current) return;
     hasRestoredMonitoredRef.current = true;
     setRestoringWatches(true);
-    axios
-      .get<{ success: boolean; watches?: MonitoredWatch[] }>('/api/user/watches')
+    axios.get<{ success: boolean; watches?: MonitoredWatch[] }>('/api/user/watches')
       .then(async (res) => {
         const watches = res.data.success && Array.isArray(res.data.watches) ? res.data.watches : [];
         if (watches.length === 0) return;
-        setMonitorStatus('Restoring monitoring...');
-
-        // Hydrate RSI + EMA alert UI state from persisted watches
-        const rsiMap: Record<string, RsiUiConfig> = {};
-        const emaEnabledMap: Record<string, boolean> = {};
-        for (const w of watches) {
-          if (w.rsi) rsiMap[w.symbol] = rsiPayloadToUi(w.rsi);
-          emaEnabledMap[w.symbol] = w.trackBullish || w.trackBearish;
-        }
-        if (Object.keys(rsiMap).length > 0) {
-          setRsiBySymbol((prev) => ({ ...rsiMap, ...prev }));
-        }
-        if (Object.keys(emaEnabledMap).length > 0) {
-          setEmaEnabledBySymbol((prev) => ({ ...emaEnabledMap, ...prev }));
-        }
-
+        setMonitorStatus('Restoring monitoring…');
+        const rsiMap: Record<string, RsiUiConfig> = {}; const emaEnabledMap: Record<string, boolean> = {};
+        for (const w of watches) { if (w.rsi) rsiMap[w.symbol] = rsiPayloadToUi(w.rsi); emaEnabledMap[w.symbol] = w.trackBullish || w.trackBearish; }
+        if (Object.keys(rsiMap).length) setRsiBySymbol((p) => ({ ...rsiMap, ...p }));
+        if (Object.keys(emaEnabledMap).length) setEmaEnabledBySymbol((p) => ({ ...emaEnabledMap, ...p }));
         const restored: string[] = [];
         for (const w of watches) {
           try {
-            // Check if the server already has this watch running (warm EMAs)
-            // to avoid destroying EMA state with a redundant POST on every refresh.
-            const emaCheck = await axios.get<{ emas?: Record<number, number | null>; warmupProgress?: Record<number, number> }>(
-              `/api/ema-status?symbol=${encodeURIComponent(w.symbol)}&timeframe=${encodeURIComponent(w.timeframe)}`
-            );
-            const hasWarmEmas = emaCheck.data?.emas && Object.values(emaCheck.data.emas).some((v) => v != null);
-            if (hasWarmEmas) {
-              // Watch is already running server-side — just mark as monitored locally
-              restored.push(w.symbol);
-              continue;
-            }
-            // Watch not running — start it
-            const r = await axios.post('/api/monitor', {
-              symbol: w.symbol,
-              timeframe: w.timeframe,
-              emaPeriods: w.emaPeriods,
-              trackBullish: w.trackBullish,
-              trackBearish: w.trackBearish,
-              exchange: w.exchange,
-              currency: w.currency,
-              rsi: w.rsi,
-            });
+            const emaCheck = await axios.get<{ emas?: Record<number, number | null> }>(`/api/ema-status?symbol=${encodeURIComponent(w.symbol)}&timeframe=${encodeURIComponent(w.timeframe)}`);
+            const warm = emaCheck.data?.emas && Object.values(emaCheck.data.emas).some((v) => v != null);
+            if (warm) { restored.push(w.symbol); continue; }
+            const r = await axios.post('/api/monitor', { symbol: w.symbol, timeframe: w.timeframe, emaPeriods: w.emaPeriods, trackBullish: w.trackBullish, trackBearish: w.trackBearish, exchange: w.exchange, currency: w.currency, rsi: w.rsi });
             if (r.data.success) restored.push(w.symbol);
-          } catch { /* skip failed */ }
+          } catch { /* skip */ }
         }
-        if (restored.length > 0) {
-          setMonitoredSymbols((prev) => new Set([...prev, ...restored]));
-        }
+        if (restored.length) setMonitoredSymbols((p) => new Set([...p, ...restored]));
         setMonitorStatus('');
       })
       .catch(() => { })
-      .finally(() => {
-        setRestoringWatches(false);
-      });
+      .finally(() => setRestoringWatches(false));
   }, [mounted, userId]);
 
-  // ===================================
-  // SOCKET.IO
-  // ===================================
-  const pendingPriceRef = useRef<Record<string, { price: number; change: number; changePercent: number; currency: string; source: string; lastUpdate: Date }>>({});
+  /* socket.io */
+  const pendingPriceRef = useRef<Record<string, PriceInfo>>({});
   const pendingEmaRef = useRef<Record<string, { emas: Record<number, number | null>; warmup: Record<number, number>; rsi?: RsiLive }>>({});
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flushSocketUpdates = useCallback(() => {
     if (Object.keys(pendingPriceRef.current).length > 0) {
-      const batch = pendingPriceRef.current;
-      pendingPriceRef.current = {};
-      setPriceByKey((prev) => ({ ...prev, ...batch }));
-      // Clear any fetch-price errors for keys that now have live data
-      setPriceErrorByKey((prev) => {
-        const next = { ...prev };
-        let changed = false;
-        for (const key of Object.keys(batch)) {
-          if (next[key]) { delete next[key]; changed = true; }
-        }
-        return changed ? next : prev;
+      const batch = pendingPriceRef.current; pendingPriceRef.current = {};
+      setPriceByKey((prev) => {
+        for (const [k, v] of Object.entries(batch)) { const old = prev[k]; if (old) setFlash(k, v.price >= old.price ? 'flash-up' : 'flash-down'); }
+        return { ...prev, ...batch };
       });
+      setPriceErrorByKey((prev) => { const next = { ...prev }; let ch = false; for (const k of Object.keys(batch)) if (next[k]) { delete next[k]; ch = true; } return ch ? next : prev; });
     }
     if (Object.keys(pendingEmaRef.current).length > 0) {
-      const batch = pendingEmaRef.current;
-      pendingEmaRef.current = {};
-      const emaUpdates: Record<string, Record<number, number | null>> = {};
-      const warmupUpdates: Record<string, Record<number, number>> = {};
-      const rsiUpdates: Record<string, RsiLive> = {};
-      for (const [k, v] of Object.entries(batch)) {
-        warmupUpdates[k] = v.warmup;
-        const hasEmaValues = Object.keys(v.emas).some((p) => v.emas[Number(p)] != null);
-        if (hasEmaValues) emaUpdates[k] = v.emas;
-        if (v.rsi) rsiUpdates[k] = v.rsi;
-      }
-      setEmaByKey((prev) => (Object.keys(emaUpdates).length > 0 ? { ...prev, ...emaUpdates } : prev));
-      setWarmupByKey((prev) => ({ ...prev, ...warmupUpdates }));
-      if (Object.keys(rsiUpdates).length > 0) {
-        setRsiByKey((prev) => ({ ...prev, ...rsiUpdates }));
-      }
+      const batch = pendingEmaRef.current; pendingEmaRef.current = {};
+      const emaU: Record<string, Record<number, number | null>> = {}; const warmU: Record<string, Record<number, number>> = {}; const rsiU: Record<string, RsiLive> = {};
+      for (const [k, v] of Object.entries(batch)) { warmU[k] = v.warmup; if (Object.keys(v.emas).some((p) => v.emas[Number(p)] != null)) emaU[k] = v.emas; if (v.rsi) rsiU[k] = v.rsi; }
+      setEmaByKey((prev) => (Object.keys(emaU).length ? { ...prev, ...emaU } : prev));
+      setWarmupByKey((prev) => ({ ...prev, ...warmU }));
+      if (Object.keys(rsiU).length) setRsiByKey((prev) => ({ ...prev, ...rsiU }));
     }
     flushTimerRef.current = null;
-  }, []);
-  const scheduleFlush = useCallback(() => {
-    if (flushTimerRef.current === null) {
-      flushTimerRef.current = setTimeout(flushSocketUpdates, 120);
-    }
-  }, [flushSocketUpdates]);
+  }, [setFlash]);
+  const scheduleFlush = useCallback(() => { if (flushTimerRef.current === null) flushTimerRef.current = setTimeout(flushSocketUpdates, 120); }, [flushSocketUpdates]);
 
   useEffect(() => {
     const origin = typeof window !== 'undefined' ? window.location.origin : '';
-    const socket = io(origin, {
-      path: '/socket.io',
-      transports: ['polling', 'websocket'],
-      reconnection: true,
-      reconnectionAttempts: Infinity,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 10000,
-      timeout: 20000,
-    });
+    const socket = io(origin, { path: '/socket.io', transports: ['polling', 'websocket'], reconnection: true, reconnectionAttempts: Infinity, reconnectionDelay: 1000, reconnectionDelayMax: 10000, timeout: 20000 });
     socketRef.current = socket;
-    socket.on('connect', () => {
-      setConnected(true);
-      // Join user-specific room so we only receive our own updates
-      if (userId) socket.emit('join:user', userId);
-    });
-    socket.on('disconnect', (reason) => {
-      setConnected(false);
-      if (reason === 'io server disconnect') socket.connect();
-    });
-    socket.on('connect_error', (err) => {
-      setConnected(false);
-      console.warn('Socket connect_error:', err.message);
-    });
+    socket.on('connect', () => { setConnected(true); if (userId) socket.emit('join:user', userId); });
+    socket.on('disconnect', (reason) => { setConnected(false); if (reason === 'io server disconnect') socket.connect(); });
+    socket.on('connect_error', () => setConnected(false));
     socket.on('price:update', (data: any) => {
-      const sym = data.symbol;
-      if (!sym) return;
-      const tf = data.timeframe ?? DEFAULT_TIMEFRAME;
-      const key = watchKey(sym, tf);
-      pendingPriceRef.current[key] = {
-        price: data.price,
-        change: data.change ?? 0,
-        changePercent: data.changePercent ?? 0,
-        currency: data.currency ?? 'INR',
-        source: data.source ?? '',
-        lastUpdate: new Date(),
-      };
+      const sym = data.symbol; if (!sym) return;
+      const key = watchKey(sym, data.timeframe ?? DEFAULT_TIMEFRAME);
+      pendingPriceRef.current[key] = { price: data.price, change: data.change ?? 0, changePercent: data.changePercent ?? 0, currency: data.currency ?? 'INR', source: data.source ?? '', lastUpdate: new Date() };
       scheduleFlush();
     });
     socket.on('ema:update', (data: any) => {
-      const sym = data.symbol;
-      const tf = data.timeframe || DEFAULT_TIMEFRAME;
-      if (!sym) return;
-      const key = watchKey(sym, tf);
-      const emas = data.emas || {};
-      const warmupProgress = data.warmupProgress || {};
-      const hasEmaValues = Object.keys(emas).some((p) => emas[p] != null);
+      const sym = data.symbol; if (!sym) return;
+      const key = watchKey(sym, data.timeframe || DEFAULT_TIMEFRAME);
+      const emas2 = data.emas || {}; const warm = data.warmupProgress || {};
       if (!pendingEmaRef.current[key]) pendingEmaRef.current[key] = { emas: {}, warmup: {} };
-      if (hasEmaValues) pendingEmaRef.current[key].emas = emas;
-      pendingEmaRef.current[key].warmup = warmupProgress;
+      if (Object.keys(emas2).some((p) => emas2[p] != null)) pendingEmaRef.current[key].emas = emas2;
+      pendingEmaRef.current[key].warmup = warm;
       if (data.rsi) pendingEmaRef.current[key].rsi = data.rsi;
       scheduleFlush();
     });
     socket.on('alert:crossover', (alert: AlertData) => {
       setAlerts((prev) => [alert, ...prev].slice(0, 100));
       if ('Notification' in window && Notification.permission === 'granted') {
-        const emoji = alert.crossoverType === 'bullish' ? '📈' : '📉';
-        new Notification(`${emoji} ${alert.symbol} EMA Alert`, {
-          body: `${alert.crossoverType.toUpperCase()}: EMA(${alert.fastPeriod}) crossed ${alert.crossoverType === 'bullish' ? 'above' : 'below'} EMA(${alert.slowPeriod}) at ${getCurrencySymbol(alert.currency)}${alert.price}`,
-          icon: '/signalstack-logo.png',
-          tag: `alert-${alert.id}`,
-        });
+        new Notification(`${alert.crossoverType === 'bullish' ? '📈' : '📉'} ${alert.symbol} EMA Alert`, { body: `${alert.crossoverType.toUpperCase()}: EMA(${alert.fastPeriod}) crossed ${alert.crossoverType === 'bullish' ? 'above' : 'below'} EMA(${alert.slowPeriod})`, icon: '/signalstack-logo.png', tag: `alert-${alert.id}` });
       }
     });
-    socket.on('alert:rsi', (alert: RsiAlertData) => {
-      setRsiAlerts((prev) => [alert, ...prev].slice(0, 100));
-      if ('Notification' in window && Notification.permission === 'granted') {
-        const emoji = alert.direction === 'bullish' ? '📈' : '📉';
-        new Notification(`${emoji} ${alert.symbol} RSI ${alert.signalType}`, {
-          body: `RSI(${alert.period}) = ${alert.rsiValue} (${alert.direction}) at ${getCurrencySymbol(alert.currency)}${alert.price}`,
-          icon: '/signalstack-logo.png',
-          tag: `rsi-${alert.id}`,
-        });
-      }
-    });
+    socket.on('alert:rsi', (alert: RsiAlertData) => { setRsiAlerts((prev) => [alert, ...prev].slice(0, 100)); });
     socket.on('monitor:status', (data: { symbol?: string; status?: string; message?: string }) => {
       setMonitorStatus(data.message || data.status || '');
-      if (data.status === 'stopped') {
-        if (data.symbol) {
-          setMonitoredSymbols((prev) => {
-            const next = new Set(prev);
-            next.delete(data.symbol!);
-            return next;
-          });
-        } else {
-          setMonitoredSymbols(new Set());
-        }
-      }
+      if (data.status === 'stopped') { if (data.symbol) setMonitoredSymbols((prev) => { const n = new Set(prev); n.delete(data.symbol!); return n; }); else setMonitoredSymbols(new Set()); }
     });
-    return () => {
-      if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
-      socket.disconnect();
-    };
-  }, [scheduleFlush, flushSocketUpdates, userId]);
+    return () => { if (flushTimerRef.current) clearTimeout(flushTimerRef.current); socket.disconnect(); };
+  }, [scheduleFlush, userId]);
 
-  // Join user room when userId becomes available (Clerk loads async after socket connects)
-  useEffect(() => {
-    if (userId && socketRef.current?.connected) {
-      socketRef.current.emit('join:user', userId);
-    }
-  }, [userId]);
+  useEffect(() => { if (userId && socketRef.current?.connected) socketRef.current.emit('join:user', userId); }, [userId]);
 
-  // Fetch persisted alerts from server on mount
+  /* fetch persisted alerts */
   useEffect(() => {
     if (!mounted || !userId) return;
-    axios.get<{ success: boolean; alerts?: AlertData[]; count?: number }>('/api/alerts')
-      .then((res) => {
-        if (res.data.success && Array.isArray(res.data.alerts) && res.data.alerts.length > 0) {
-          setAlerts(res.data.alerts);
-          console.log(`[EMAAlertSystem] Restored ${res.data.alerts.length} alert(s) from server`);
-        }
-      })
-      .catch((err: any) => {
-        console.warn('[EMAAlertSystem] Failed to load alerts:', err.response?.status, err.message);
-      });
+    axios.get<{ success: boolean; alerts?: AlertData[] }>('/api/alerts').then((r) => { if (r.data.success && r.data.alerts?.length) setAlerts(r.data.alerts); }).catch(() => { });
   }, [mounted, userId]);
 
-  // Poll EMA status when monitoring and socket may not deliver (e.g. mobile, deploy without persistent WS)
+  /* poll ema status for selected */
   useEffect(() => {
-    const symbol = displaySymbol;
-    const timeframe = displayTimeframe;
+    const symbol = displaySymbol; const timeframe = displayTimeframe;
     if (!symbol || !monitoredSymbols.has(symbol)) return;
-
     const key = watchKey(symbol, timeframe);
     const poll = async () => {
       try {
-        const { data } = await axios.get<{ emas: Record<number, number | null>; warmupProgress: Record<number, number>; rsi?: RsiLive }>(
-          `/api/ema-status?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`
-        );
-        if (data?.emas && Object.keys(data.emas).length > 0) {
-          setEmaByKey((prev) => ({ ...prev, [key]: { ...prev[key], ...data.emas } }));
-        }
-        if (data?.warmupProgress && Object.keys(data.warmupProgress).length > 0) {
-          setWarmupByKey((prev) => ({ ...prev, [key]: { ...prev[key], ...data.warmupProgress } }));
-        }
-        if (data?.rsi) {
-          setRsiByKey((prev) => ({ ...prev, [key]: data.rsi! }));
-        }
-      } catch {
-        // ignore (e.g. serverless or no server)
-      }
+        const { data } = await axios.get<{ emas: Record<number, number | null>; warmupProgress: Record<number, number>; rsi?: RsiLive }>(`/api/ema-status?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`);
+        if (data?.emas && Object.keys(data.emas).length) setEmaByKey((p) => ({ ...p, [key]: { ...p[key], ...data.emas } }));
+        if (data?.warmupProgress && Object.keys(data.warmupProgress).length) setWarmupByKey((p) => ({ ...p, [key]: { ...p[key], ...data.warmupProgress } }));
+        if (data?.rsi) setRsiByKey((p) => ({ ...p, [key]: data.rsi! }));
+      } catch { /* ignore */ }
     };
-
-    poll();
-    const interval = setInterval(poll, 5000);
-    return () => clearInterval(interval);
+    poll(); const id = setInterval(poll, 5000); return () => clearInterval(id);
   }, [displaySymbol, displayTimeframe, monitoredSymbols]);
 
-  useEffect(() => {
-    if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
-  }, []);
+  useEffect(() => { if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission(); }, []);
 
-  // Close search dropdown when clicking outside
-  useEffect(() => {
-    if (!showSearch) return;
-    const handleClickOutside = (e: MouseEvent) => {
-      if (searchContainerRef.current && !searchContainerRef.current.contains(e.target as Node)) {
-        setShowSearch(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [showSearch]);
+  /* ---------- Search ---------- */
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [searchExchangeFilter, setSearchExchangeFilter] = useState<'ALL' | 'NSE' | 'NFO' | 'BSE'>('ALL');
+  const [isSearching, setIsSearching] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
 
-  const getCurrencySymbol = (c: string) => {
-    const symbols: Record<string, string> = { USD: '$', INR: '₹', GBP: '£', JPY: '¥', EUR: '€' };
-    return symbols[c] || c;
-  };
-
-  const getOptionMeta = (sym: string, exchange?: string): { isOption: boolean; side: 'CE' | 'PE' | null } => {
-    // Only treat as option for NFO instruments (we no longer infer expiry here)
-    if (exchange && exchange !== 'NFO') {
-      return { isOption: false, side: null };
-    }
-    const upper = sym.toUpperCase();
-    const isCE = upper.endsWith('CE');
-    const isPE = upper.endsWith('PE');
-    const isOption = isCE || isPE;
-    return { isOption, side: isCE ? 'CE' : isPE ? 'PE' : null };
-  };
-
-  // ===================================
-  // SEARCH
-  // ===================================
-  const searchStocks = useCallback(async (query: string, exchangeFilter?: 'ALL' | 'NSE' | 'NFO' | 'BSE') => {
-    if (!query || query.length < 1) { setSearchResults([]); setShowSearch(false); return; }
-    const filter = exchangeFilter ?? searchExchangeFilter;
-    console.log('[EMAAlertSystem] searchStocks called, query:', query, 'exchange:', filter);
+  const searchStocks = useCallback(async (query: string, filter: 'ALL' | 'NSE' | 'NFO' | 'BSE') => {
+    if (!query || query.length < 1) { setSearchResults([]); return; }
     setIsSearching(true);
     try {
       const q = query.trim();
-      if (filter === 'NSE' || filter === 'NFO' || filter === 'BSE') {
+      if (filter !== 'ALL') {
         const res = await axios.post<{ success: boolean; results: SearchResult[] }>(`/api/search-symbols/${filter.toLowerCase()}`, { query: q });
-        if (res.data.success) { setSearchResults(res.data.results); setShowSearch(true); }
-        else setSearchResults([]);
+        setSearchResults(res.data.success ? res.data.results : []);
       } else {
         const settled = await Promise.allSettled([
           axios.post<{ success: boolean; results: SearchResult[] }>('/api/search-symbols/nse', { query: q }),
           axios.post<{ success: boolean; results: SearchResult[] }>('/api/search-symbols/nfo', { query: q }),
           axios.post<{ success: boolean; results: SearchResult[] }>('/api/search-symbols/bse', { query: q }),
         ]);
-        const seen = new Set<string>();
-        const merged: SearchResult[] = [];
+        const seen = new Set<string>(); const merged: SearchResult[] = [];
         for (const s of settled) {
           if (s.status !== 'fulfilled' || !s.value?.data?.success || !Array.isArray(s.value.data.results)) continue;
-          for (const r of s.value.data.results) {
-            const key = `${r.exchange || 'NSE'}:${r.symbol}`;
-            if (seen.has(key)) continue;
-            seen.add(key);
-            merged.push(r);
-          }
+          for (const r of s.value.data.results) { const k = `${r.exchange || 'NSE'}:${r.symbol}`; if (seen.has(k)) continue; seen.add(k); merged.push(r); }
         }
         setSearchResults(merged.slice(0, 30));
-        setShowSearch(true);
       }
-    } catch (err: any) {
-      console.error('[EMAAlertSystem] search-symbols request failed:', err?.message, err?.response?.data);
-      setSearchResults([]);
-    } finally { setIsSearching(false); }
-  }, [searchExchangeFilter]);
+    } catch { setSearchResults([]); } finally { setIsSearching(false); }
+  }, []);
 
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const debouncedSearch = useCallback((query: string) => {
+  const debouncedSearch = useCallback((query: string, filter: 'ALL' | 'NSE' | 'NFO' | 'BSE') => {
     if (searchDebounceRef.current) clearTimeout(searchDebounceRef.current);
-    if (!query) { setSearchResults([]); setShowSearch(false); return; }
-    searchDebounceRef.current = setTimeout(() => searchStocks(query, searchExchangeFilter), 400);
-  }, [searchStocks, searchExchangeFilter]);
+    if (!query) { setSearchResults([]); return; }
+    searchDebounceRef.current = setTimeout(() => searchStocks(query, filter), 380);
+  }, [searchStocks]);
+
+  useEffect(() => {
+    if (searchOpen) { setTimeout(() => searchInputRef.current?.focus(), 240); }
+    else { setSearchQuery(''); setSearchResults([]); setSearchExchangeFilter('ALL'); }
+  }, [searchOpen]);
 
   const addSymbol = async (result: SearchResult) => {
-    const toReplace = replacingSymbol;
-    const isReplace = toReplace != null;
-    const isDuplicate = symbols.some((s) => s.symbol.toUpperCase() === result.symbol.toUpperCase());
-    if (isDuplicate && !isReplace) {
-      setShowSearch(false);
-      setSearchQuery('');
-      return;
-    }
-    const newEntry: MonitoredSymbol = {
-      symbol: result.symbol,
-      name: result.name,
-      currency: result.currency || 'INR',
-      exchange: result.exchange || 'NSE',
-    };
-    if (isReplace && toReplace) {
-      const sym = toReplace;
-      const tf = getTimeframe(sym);
-      if (monitoredSymbols.has(sym)) {
-        try {
-          await axios.delete('/api/monitor', { data: { symbol: sym, timeframe: tf } });
-        } catch { /* ignore */ }
-        setMonitoredSymbols((prev) => { const next = new Set(prev); next.delete(sym); return next; });
-      }
-      const key = watchKey(sym, tf);
-      setPriceByKey((prev) => { const next = { ...prev }; delete next[key]; return next; });
-      setEmaByKey((prev) => { const next = { ...prev }; delete next[key]; return next; });
-      setWarmupByKey((prev) => { const next = { ...prev }; delete next[key]; return next; });
-      setTimeframeBySymbol((prev) => { const next = { ...prev }; delete next[sym]; return next; });
-      setEmasBySymbol((prev) => { const next = { ...prev }; delete next[sym]; return next; });
-      setReplacingSymbol(null);
-    }
-    setSymbols((prev) =>
-      isReplace && toReplace
-        ? prev.filter((s) => s.symbol !== toReplace).concat([newEntry])
-        : [...prev, newEntry]
-    );
+    if (symbols.some((s) => s.symbol.toUpperCase() === result.symbol.toUpperCase())) { setSelectedSymbol(result.symbol); setSearchOpen(false); return; }
+    const entry: MonitoredSymbol = { symbol: result.symbol, name: result.name, currency: result.currency || 'INR', exchange: result.exchange || 'NSE' };
+    setSymbols((prev) => [...prev, entry]);
     setTimeframeBySymbol((prev) => ({ ...prev, [result.symbol]: DEFAULT_TIMEFRAME }));
-    setEmasBySymbol((prev) => ({
-      ...prev,
-      [result.symbol]: prev[result.symbol] ?? [],
-    }));
-    setSearchQuery('');
-    setShowSearch(false);
-    setShowSearchMobile(false);
+    setEmasBySymbol((prev) => ({ ...prev, [result.symbol]: prev[result.symbol] ?? [9, 21, 50].map((p, i) => ({ id: Date.now() + i, period: p, color: COLORS[i % COLORS.length] })) }));
     setSelectedSymbol(result.symbol);
-    if (userId) {
-      axios.post('/api/user/watchlist', { symbol: result.symbol }).catch(() => { });
-      if (isReplace && toReplace) {
-        axios.delete('/api/user/watchlist', { params: { symbol: toReplace } }).catch(() => { });
-      }
-    }
+    setSearchOpen(false);
+    if (userId) axios.post('/api/user/watchlist', { symbol: result.symbol }).catch(() => { });
   };
 
   const removeSymbol = async (sym: string) => {
     const tf = getTimeframe(sym);
-    if (monitoredSymbols.has(sym)) {
-      try {
-        await axios.delete('/api/monitor', { data: { symbol: sym, timeframe: tf } });
-      } catch { /* ignore */ }
-      setMonitoredSymbols((prev) => {
-        const next = new Set(prev);
-        next.delete(sym);
-        return next;
-      });
-    }
+    if (monitoredSymbols.has(sym)) { try { await axios.delete('/api/monitor', { data: { symbol: sym, timeframe: tf } }); } catch { /* ignore */ } setMonitoredSymbols((prev) => { const n = new Set(prev); n.delete(sym); return n; }); }
     const remaining = symbols.filter((s) => s.symbol !== sym);
     setSymbols(remaining);
-    setTimeframeBySymbol((prev) => { const next = { ...prev }; delete next[sym]; return next; });
-    setEmasBySymbol((prev) => { const next = { ...prev }; delete next[sym]; return next; });
+    setTimeframeBySymbol((prev) => { const n = { ...prev }; delete n[sym]; return n; });
+    setEmasBySymbol((prev) => { const n = { ...prev }; delete n[sym]; return n; });
     if (selectedSymbol === sym) setSelectedSymbol(remaining[0]?.symbol ?? null);
-    const key = watchKey(sym, tf);
-    setPriceByKey((prev) => { const next = { ...prev }; delete next[key]; return next; });
-    setEmaByKey((prev) => { const next = { ...prev }; delete next[key]; return next; });
-    setWarmupByKey((prev) => { const next = { ...prev }; delete next[key]; return next; });
-    if (userId) {
-      axios.delete('/api/user/watchlist', { params: { symbol: sym } }).catch(() => { });
-    }
-  };
-
-  const stopMonitoringForSymbol = async (sym: string) => {
-    const tf = getTimeframe(sym);
-    try {
-      await axios.delete('/api/monitor', { data: { symbol: sym, timeframe: tf } });
-    } catch { /* ignore */ }
-    setMonitoredSymbols((prev) => {
-      const next = new Set(prev);
-      next.delete(sym);
-      return next;
-    });
-    if (userId) refetchWatches();
     const key = watchKey(sym, tf);
     setPriceByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
     setEmaByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
-    setWarmupByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
+    if (userId) axios.delete('/api/user/watchlist', { params: { symbol: sym } }).catch(() => { });
   };
 
-  const getExchange = useCallback((sym: string): string => {
-    const s = symbols.find((x) => x.symbol === sym);
-    return s?.exchange || 'NSE';
-  }, [symbols]);
-
+  /* ---------- Price fetch ---------- */
   const fetchPrice = useCallback(async (sym: string, tf: string, exchange?: string, skipLoading?: boolean) => {
     if (!sym) return;
     const exch = exchange ?? getExchange(sym);
-    if (!skipLoading) setIsFetchingPrice(true);
     try {
       const res = await axios.post('/api/fetch-price', { symbol: sym, timeframe: tf, exchange: exch });
+      const key = watchKey(sym, tf);
       if (res.data.success && res.data.data) {
-        const key = watchKey(sym, tf);
-        setPriceByKey((prev) => ({
-          ...prev,
-          [key]: {
-            price: res.data.data.price,
-            change: res.data.data.change || 0,
-            changePercent: res.data.data.changePercent || 0,
-            currency: res.data.data.currency || 'INR',
-            source: res.data.data.source || '',
-            lastUpdate: new Date(),
-          },
-        }));
-        setPriceErrorByKey((prev) => {
-          const next = { ...prev };
-          delete next[key];
-          return next;
-        });
+        setPriceByKey((prev) => { const old = prev[key]; if (old) setFlash(key, res.data.data.price >= old.price ? 'flash-up' : 'flash-down'); return { ...prev, [key]: { price: res.data.data.price, change: res.data.data.change || 0, changePercent: res.data.data.changePercent || 0, currency: res.data.data.currency || 'INR', source: res.data.data.source || '', lastUpdate: new Date() } }; });
+        setPriceErrorByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
       } else {
-        const key = watchKey(sym, tf);
-        const msg: string =
-          typeof res.data?.error === 'string' && res.data.error.length > 0
-            ? res.data.error
-            : 'No price/EMA data available for this symbol and timeframe (contract may be expired or illiquid).';
-        setPriceErrorByKey((prev) => ({ ...prev, [key]: msg }));
+        setPriceErrorByKey((prev) => ({ ...prev, [key]: typeof res.data?.error === 'string' && res.data.error ? res.data.error : 'No price data for this symbol/timeframe (contract may be expired or illiquid).' }));
       }
-    } catch { /* ignore */ } finally { if (!skipLoading) setIsFetchingPrice(false); }
-  }, []);
+    } catch { /* ignore */ } void skipLoading;
+  }, [getExchange, setFlash]);
 
-  const symbolKeys = symbols.map((s) => s.symbol).join(',');
-  const timeframeFetchKey = useMemo(
-    () => symbols.map((s) => `${s.symbol}:${timeframeBySymbol[s.symbol] ?? DEFAULT_TIMEFRAME}`).sort().join(','),
-    [symbols, timeframeBySymbol]
-  );
-  const symbolsRef = useRef<MonitoredSymbol[]>(symbols);
-  symbolsRef.current = symbols;
-  const timeframeBySymbolRef = useRef<Record<string, string>>(timeframeBySymbol);
-  timeframeBySymbolRef.current = timeframeBySymbol;
+  const timeframeFetchKey = useMemo(() => symbols.map((s) => `${s.symbol}:${timeframeBySymbol[s.symbol] ?? DEFAULT_TIMEFRAME}`).sort().join(','), [symbols, timeframeBySymbol]);
+  const symbolsRef = useRef<MonitoredSymbol[]>(symbols); symbolsRef.current = symbols;
+  const tfRef = useRef<Record<string, string>>(timeframeBySymbol); tfRef.current = timeframeBySymbol;
   const lastFetchedRef = useRef('');
-
   useEffect(() => {
-    if (!symbolKeys) return;
+    if (!symbols.length) return;
     if (lastFetchedRef.current === timeframeFetchKey) return;
-    const list = symbolsRef.current;
-    const tfBySym = timeframeBySymbolRef.current;
-    const previousKey = lastFetchedRef.current;
-    const previousMap: Record<string, string> = previousKey
-      ? Object.fromEntries(
-          previousKey.split(',').filter(Boolean).map((part) => {
-            const i = part.indexOf(':');
-            return [part.slice(0, i), part.slice(i + 1)];
-          })
-        )
-      : {};
-    const toFetch = list.filter((s) => {
-      const tf = tfBySym[s.symbol] ?? DEFAULT_TIMEFRAME;
-      const prev = previousMap[s.symbol];
-      return prev === undefined || prev !== tf;
-    });
+    const prevMap: Record<string, string> = lastFetchedRef.current ? Object.fromEntries(lastFetchedRef.current.split(',').filter(Boolean).map((p) => { const i = p.indexOf(':'); return [p.slice(0, i), p.slice(i + 1)]; })) : {};
+    const toFetch = symbolsRef.current.filter((s) => { const tf = tfRef.current[s.symbol] ?? DEFAULT_TIMEFRAME; const prev = prevMap[s.symbol]; return prev === undefined || prev !== tf; });
     lastFetchedRef.current = timeframeFetchKey;
-    if (toFetch.length === 0) return;
-    setIsFetchingPrice(true);
-    Promise.all(
-      toFetch.map((s) => fetchPrice(s.symbol, tfBySym[s.symbol] ?? DEFAULT_TIMEFRAME, s.exchange, true))
-    ).finally(() => setIsFetchingPrice(false));
-  }, [timeframeFetchKey, symbolKeys, fetchPrice]);
+    if (!toFetch.length) return;
+    Promise.all(toFetch.map((s) => fetchPrice(s.symbol, tfRef.current[s.symbol] ?? DEFAULT_TIMEFRAME, s.exchange, true))).catch(() => { });
+  }, [timeframeFetchKey, symbols.length, fetchPrice]);
 
-  // ===================================
-  // EMA MANAGEMENT
-  // ===================================
+  /* timeframe change (stops monitoring for that symbol if running) */
+  const changeTimeframe = (sym: string, tf: string) => {
+    const oldTf = getTimeframe(sym);
+    if (monitoredSymbols.has(sym) && oldTf !== tf) {
+      axios.delete('/api/monitor', { data: { symbol: sym, timeframe: oldTf } }).catch(() => { });
+      setMonitoredSymbols((prev) => { const n = new Set(prev); n.delete(sym); return n; });
+      if (userId) refetchWatches();
+      const oldKey = watchKey(sym, oldTf);
+      setEmaByKey((p) => { const n = { ...p }; delete n[oldKey]; return n; });
+      setWarmupByKey((p) => { const n = { ...p }; delete n[oldKey]; return n; });
+      setMonitorStatus(`Monitoring stopped — start again to use ${tf}`); setTimeout(() => setMonitorStatus(''), 4000);
+    }
+    setTimeframeBySymbol((prev) => ({ ...prev, [sym]: tf }));
+  };
+
+  /* ---------- EMA management ---------- */
+  const stopMonitoringForSymbol = async (sym: string) => {
+    const tf = getTimeframe(sym);
+    try { await axios.delete('/api/monitor', { data: { symbol: sym, timeframe: tf } }); } catch { /* ignore */ }
+    setMonitoredSymbols((prev) => { const n = new Set(prev); n.delete(sym); return n; });
+    if (userId) refetchWatches();
+    const key = watchKey(sym, tf);
+    setEmaByKey((p) => { const n = { ...p }; delete n[key]; return n; });
+    setWarmupByKey((p) => { const n = { ...p }; delete n[key]; return n; });
+  };
+
   const addEma = (period?: number) => {
     if (!displaySymbol) return;
-    const p = period || parseInt(newEmaPeriod);
+    const p = period || parseInt(newEmaPeriod, 10);
     if (!p || p <= 0) return;
     const current = emasBySymbol[displaySymbol] ?? [];
     if (current.some((e) => e.period === p)) return;
-    setEmasBySymbol((prev) => ({
-      ...prev,
-      [displaySymbol]: [...(prev[displaySymbol] ?? []), { id: Date.now(), period: p, color: COLORS[(prev[displaySymbol]?.length ?? 0) % COLORS.length] }],
-    }));
+    setEmasBySymbol((prev) => ({ ...prev, [displaySymbol]: [...(prev[displaySymbol] ?? []), { id: Date.now(), period: p, color: COLORS[(prev[displaySymbol]?.length ?? 0) % COLORS.length] }].sort((a, b) => a.period - b.period) }));
     setNewEmaPeriod('');
-    setShowAddEma(false);
-    if (monitoredSymbols.has(displaySymbol)) {
-      stopMonitoringForSymbol(displaySymbol);
-      setMonitorStatus('Monitoring stopped — start again to apply EMA change');
-      setTimeout(() => setMonitorStatus(''), 4000);
-    }
+    if (monitoredSymbols.has(displaySymbol)) { stopMonitoringForSymbol(displaySymbol); setMonitorStatus('Monitoring stopped — start again to apply EMA change'); setTimeout(() => setMonitorStatus(''), 4000); }
   };
   const removeEma = (id: number) => {
     if (!displaySymbol) return;
-    const current = emasBySymbol[displaySymbol] ?? [];
-    const nextEmas = current.filter((e) => e.id !== id);
-    setEmasBySymbol((prev) => ({
-      ...prev,
-      [displaySymbol]: nextEmas,
-    }));
-    if (monitoredSymbols.has(displaySymbol)) {
-      stopMonitoringForSymbol(displaySymbol);
-      setMonitorStatus('Monitoring stopped — start again to apply EMA change');
-      setTimeout(() => setMonitorStatus(''), 4000);
-    }
+    setEmasBySymbol((prev) => ({ ...prev, [displaySymbol]: (prev[displaySymbol] ?? []).filter((e) => e.id !== id) }));
+    if (monitoredSymbols.has(displaySymbol)) { stopMonitoringForSymbol(displaySymbol); setMonitorStatus('Monitoring stopped — start again to apply EMA change'); setTimeout(() => setMonitorStatus(''), 4000); }
   };
 
   const startMonitoringForSymbol = async (sym: string) => {
-    if (restoringWatches) {
-      setMonitorStatus('Restoring existing monitoring from server — please wait until this finishes before changing monitors.');
-      return;
-    }
-    if (monitoringBusy) {
-      setMonitorStatus('Monitoring is already starting — please wait until it finishes before pressing the button again.');
-      return;
-    }
+    if (restoringWatches || monitoringBusy) { setMonitorStatus('Please wait — monitoring is busy.'); return; }
     const symbolEmas = emasBySymbol[sym] ?? [];
     const emaOn = emaEnabledBySymbol[sym] ?? true;
     const symRsiUi = rsiBySymbol[sym] ?? EMPTY_RSI_UI;
     const rsiCheck = buildRsiPayload(symRsiUi);
     const rsiOn = symRsiUi.enabled && rsiCheck.ok && !!rsiCheck.rsi;
-    if (!emaOn && !rsiOn) {
-      setMonitorStatus(`${sym}: enable EMA alerts, RSI alerts, or both.`);
-      return;
-    }
-    if (emaOn && symbolEmas.length < 2) {
-      setMonitorStatus(`${sym}: add at least 2 EMAs for crossover alerts.`);
-      return;
-    }
-    if (!rsiCheck.ok) {
-      setRsiFormError(rsiCheck.error);
-      setMonitorStatus(`${sym}: ${rsiCheck.error}`);
-      return;
-    }
-    const s = symbols.find((x) => x.symbol === sym);
-    if (!s) return;
+    if (!emaOn && !rsiOn) { setMonitorStatus(`${sym}: enable EMA alerts, RSI alerts, or both.`); return; }
+    if (emaOn && symbolEmas.length < 2) { setMonitorStatus(`${sym}: add at least 2 EMAs for crossover alerts.`); return; }
+    if (!rsiCheck.ok) { setRsiFormError(rsiCheck.error); setMonitorStatus(`${sym}: ${rsiCheck.error}`); return; }
+    const s = symbols.find((x) => x.symbol === sym); if (!s) return;
     const tf = getTimeframe(sym);
     try {
       setMonitoringBusy(true);
-      const alertParts = [emaOn && 'EMA', rsiOn && 'RSI'].filter(Boolean).join(' + ');
-      setMonitorStatus(`Starting ${sym} (${alertParts}) — loading history and warming indicators. This can take 20–30 seconds.`);
-      const res = await axios.post('/api/monitor', {
-        symbol: s.symbol,
-        timeframe: tf,
-        emaPeriods: symbolEmas.map((e) => e.period),
-        trackBullish: emaOn ? trackBullish : false,
-        trackBearish: emaOn ? trackBearish : false,
-        exchange: s.exchange || 'NSE',
-        currency: s.currency,
-        rsi: rsiCheck.rsi,
-      });
-      if (res.data.success) {
-        setMonitoredSymbols((prev) => new Set(prev).add(sym));
-        setMonitorStatus('');
-        if (userId) refetchWatches();
-      } else {
-        setMonitorStatus(res.data.message || 'Failed');
-      }
-    } catch (err: any) {
-      setMonitorStatus('Error');
-      console.error(err);
-    } finally {
-      setMonitoringBusy(false);
-    }
+      setMonitorStatus(`Starting ${sym} — loading history and warming indicators (20–30s).`);
+      const res = await axios.post('/api/monitor', { symbol: s.symbol, timeframe: tf, emaPeriods: symbolEmas.map((e) => e.period), trackBullish: emaOn ? trackBullish : false, trackBearish: emaOn ? trackBearish : false, exchange: s.exchange || 'NSE', currency: s.currency, rsi: rsiCheck.rsi });
+      if (res.data.success) { setMonitoredSymbols((prev) => new Set(prev).add(sym)); setMonitorStatus(''); if (userId) refetchWatches(); }
+      else setMonitorStatus(res.data.message || 'Failed');
+    } catch { setMonitorStatus('Error'); } finally { setMonitoringBusy(false); }
   };
 
-  /**
-   * Stop monitoring only for the currently selected symbol when alert-mode
-   * switches (Bullish/Bearish). Other symbols keep running with their
-   * existing server-side settings until changed individually.
-   */
-  const stopAllMonitoringFromConfigChange = useCallback(() => {
-    if (!displaySymbol || !monitoredSymbols.has(displaySymbol)) return;
-    const sym = displaySymbol;
-    const tf = getTimeframe(sym);
-    axios.delete('/api/monitor', { data: { symbol: sym, timeframe: tf } }).catch(() => { });
-    const key = watchKey(sym, tf);
-    setPriceByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
-    setEmaByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
-    setWarmupByKey((prev) => { const n = { ...prev }; delete n[key]; return n; });
-    setMonitoredSymbols((prev) => {
-      const next = new Set(prev);
-      next.delete(sym);
-      return next;
-    });
-    if (userId) refetchWatches();
-    setMonitorStatus('Monitoring stopped for this symbol — start again to apply alert settings');
-    setTimeout(() => setMonitorStatus(''), 4000);
-  }, [displaySymbol, monitoredSymbols, getTimeframe, userId]);
-
-  const _startMonitoring = async () => {
-    if (restoringWatches) {
-      setMonitorStatus('Restoring existing monitoring from server — please wait until this finishes before changing monitors.');
-      return;
-    }
-    if (monitoringBusy) {
-      setMonitorStatus('Monitoring is already starting — please wait until it finishes before pressing the button again.');
-      return;
-    }
-    if (symbols.length === 0) {
-      alert('Add at least one symbol');
-      return;
-    }
-    try {
-      setMonitoringBusy(true);
-      setMonitorStatus('Starting monitoring for all symbols — loading up to 90 days of history and warming EMAs. This can take 20–30 seconds.');
-      const started: string[] = [];
-      const startedWatches: MonitoredWatch[] = [];
-      for (const s of symbols) {
-        const symbolEmas = emasBySymbol[s.symbol] ?? [];
-        const emaPeriods = symbolEmas.map((e) => e.period);
-        if (emaPeriods.length < 2) {
-          setMonitorStatus(`${s.symbol}: add at least 2 EMAs`);
-          break;
-        }
-        const tf = getTimeframe(s.symbol);
-        const res = await axios.post('/api/monitor', {
-          symbol: s.symbol,
-          timeframe: tf,
-          emaPeriods,
-          trackBullish,
-          trackBearish,
-          exchange: s.exchange || 'NSE',
-          currency: s.currency,
-        });
-        if (!res.data.success) {
-          setMonitorStatus(res.data.message || 'Failed');
-          break;
-        }
-        started.push(s.symbol);
-        startedWatches.push({
-          symbol: s.symbol,
-          timeframe: tf,
-          emaPeriods,
-          trackBullish,
-          trackBearish,
-          exchange: s.exchange || 'NSE',
-          currency: s.currency,
-        });
-      }
-      if (started.length > 0) {
-        setMonitoredSymbols((prev) => new Set([...prev, ...started]));
-        if (userId) refetchWatches();
-      }
-      setMonitorStatus(prev => (started.length > 0 ? '' : prev));
-    } catch (err: any) {
-      setMonitorStatus('Error');
-      console.error(err);
-    } finally {
-      setMonitoringBusy(false);
-    }
+  const toggleMonitorSelected = () => {
+    if (!displaySymbol) { setMonitorStatus('Add a symbol first.'); return; }
+    if (monitoredSymbols.has(displaySymbol)) stopMonitoringForSymbol(displaySymbol);
+    else startMonitoringForSymbol(displaySymbol);
   };
 
-  const stopMonitoring = async () => {
-    try {
-      for (const sym of monitoredSymbols) {
-        await axios.delete('/api/monitor', { data: { symbol: sym, timeframe: getTimeframe(sym) } });
-      }
-      setMonitoredSymbols(new Set());
-      setMonitorStatus('');
-      if (userId) refetchWatches();
-    } catch { /* ignore */ }
+  /* ---------- Push / Email / Tools ---------- */
+  const urlBase64ToUint8Array = (s: string): Uint8Array => {
+    const pad = '='.repeat((4 - (s.length % 4)) % 4); const b64 = (s + pad).replace(/-/g, '+').replace(/_/g, '/');
+    const raw = atob(b64); const out = new Uint8Array(raw.length); for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i); return out;
   };
-
-  const _resetAll = async () => {
-    if (monitoredSymbols.size > 0) {
-      try {
-        for (const sym of monitoredSymbols) {
-          await axios.delete('/api/monitor', { data: { symbol: sym, timeframe: getTimeframe(sym) } });
-        }
-      } catch { /* ignore */ }
-    }
-    setMonitoredSymbols(new Set());
-    setMonitorStatus('');
-    setSymbols([]);
-    setSelectedSymbol(null);
-    setTimeframeBySymbol({});
-    setPriceByKey({});
-    setEmaByKey({});
-    setWarmupByKey({});
-    setSearchQuery('');
-    setEmasBySymbol({});
-    setShowAddEma(false);
-    setNewEmaPeriod('');
-    setEditingPairIndex(null);
-    if (userId) {
-      axios.put('/api/user/config', { symbols: [], timeframeBySymbol: {}, emasBySymbol: {}, trackBullish: true, trackBearish: true, selectedSymbol: null }).catch(() => { });
-      refetchWatches();
-    }
-  };
-
-  /** Reset: stop all monitoring and clear live data only. Keeps symbol list and EMA config. */
-  const resetConfigKeepSymbols = () => {
-    setMonitoredSymbols(new Set());
-    setMonitorStatus('');
-    setPriceByKey({});
-    setEmaByKey({});
-    setWarmupByKey({});
-    setSearchQuery('');
-    setShowAddEma(false);
-    setNewEmaPeriod('');
-    setEditingPairIndex(null);
-    setSelectedSymbol((prev) => (symbols.length > 0 ? (prev && symbols.some((s) => s.symbol === prev) ? prev : symbols[0].symbol) : null));
-    if (userId) refetchWatches();
-  };
-
-  const handleReset = async () => {
-    if (monitoredSymbols.size > 0) {
-      try {
-        for (const sym of monitoredSymbols) {
-          await axios.delete('/api/monitor', { data: { symbol: sym, timeframe: getTimeframe(sym) } });
-        }
-      } catch { /* ignore */ }
-    }
-    resetConfigKeepSymbols();
-  };
-
-  /** Decode base64url VAPID public key for PushManager (see OpenReplay Web Push guide) */
-  const urlBase64ToUint8Array = (base64String: string): Uint8Array => {
-    const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
-    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
-    const rawData = atob(base64);
-    const outputArray = new Uint8Array(rawData.length);
-    for (let i = 0; i < rawData.length; ++i) outputArray[i] = rawData.charCodeAt(i);
-    return outputArray;
-  };
-
   const enablePush = async () => {
     try {
       if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
-      // Request permission on user gesture (required by browsers)
-      const permission = await Notification.requestPermission();
-      if (permission !== 'granted') return;
-      const registration = await navigator.serviceWorker.ready;
+      if ((await Notification.requestPermission()) !== 'granted') return;
+      const reg = await navigator.serviceWorker.ready;
       const { data } = await axios.get<{ publicKey: string }>('/api/push-public-key');
       if (!data?.publicKey) return;
-      const applicationServerKey = urlBase64ToUint8Array(data.publicKey);
-      const subscription = await registration.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: applicationServerKey as BufferSource,
-      });
-      await axios.post('/api/push-subscribe', subscription.toJSON());
+      const sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(data.publicKey) as BufferSource });
+      await axios.post('/api/push-subscribe', sub.toJSON());
       setPushEnabled(true);
-    } catch (err) {
-      console.error('Push subscription failed:', err);
-    }
+    } catch (e) { console.error('Push subscribe failed', e); }
   };
-
-  const disablePush = useCallback(async () => {
-    if (!window.confirm('Confirm you want to turn alerts off? You will stop receiving push and in-app crossover alerts until you enable them again.')) return;
+  const disablePush = async () => {
+    if (!window.confirm('Turn alerts off? You will stop receiving push and in-app alerts until you enable them again.')) return;
     setPushEnabled(false);
-    try {
-      const registration = await navigator.serviceWorker?.ready;
-      const subscription = await registration?.pushManager?.getSubscription();
-      if (subscription?.endpoint) {
-        await axios.delete('/api/push-subscribe', { data: { endpoint: subscription.endpoint } });
-        await subscription.unsubscribe();
-      }
-    } catch (err) {
-      console.error('Push unsubscribe failed:', err);
-    }
-  }, []);
-
+    try { const reg = await navigator.serviceWorker?.ready; const sub = await reg?.pushManager?.getSubscription(); if (sub?.endpoint) { await axios.delete('/api/push-subscribe', { data: { endpoint: sub.endpoint } }); await sub.unsubscribe(); } } catch { /* ignore */ }
+  };
   const sendTestEmail = async () => {
-    setTestEmailStatus('sending');
-    setTestEmailMessage(null);
-    try {
-      const res = await axios.post<{ success: boolean; message?: string; error?: string; email?: string }>('/api/test-email');
-      if (res.data.success) {
-        setTestEmailStatus('success');
-        setTestEmailMessage(res.data.message ?? (res.data.email ? `Sent to ${res.data.email}` : null));
-        setTimeout(() => { setTestEmailStatus('idle'); setTestEmailMessage(null); }, 5000);
-      } else {
-        setTestEmailStatus('error');
-        setTestEmailMessage(res.data.error ?? 'Send failed');
-        setTimeout(() => { setTestEmailStatus('idle'); setTestEmailMessage(null); }, 5000);
-      }
-    } catch (err: unknown) {
-      setTestEmailStatus('error');
-      const msg = err && typeof err === 'object' && 'response' in err && err.response && typeof err.response === 'object' && 'data' in err.response
-        ? (err.response.data as { error?: string })?.error
-        : 'Request failed';
-      setTestEmailMessage(msg ?? 'Request failed');
-      setTimeout(() => { setTestEmailStatus('idle'); setTestEmailMessage(null); }, 5000);
-    }
+    setTestEmailStatus('sending'); setTestEmailMessage(null);
+    try { const res = await axios.post<{ success: boolean; message?: string; error?: string; email?: string }>('/api/test-email'); if (res.data.success) { setTestEmailStatus('success'); setTestEmailMessage(res.data.message ?? (res.data.email ? `Sent to ${res.data.email}` : null)); } else { setTestEmailStatus('error'); setTestEmailMessage(res.data.error ?? 'Send failed'); } }
+    catch { setTestEmailStatus('error'); setTestEmailMessage('Request failed'); }
+    setTimeout(() => { setTestEmailStatus('idle'); setTestEmailMessage(null); }, 5000);
   };
-
   const sendTestPush = async (delaySeconds = 0) => {
-    setTestPushStatus('sending');
-    setTestPushMessage(null);
+    setTestPushStatus('sending'); setTestPushMessage(null);
+    try { const res = await axios.post<{ success: boolean; message?: string; error?: string; sent?: number; scheduled?: boolean }>('/api/push-test', delaySeconds > 0 ? { delaySeconds } : {}); if (res.data.success) { setTestPushStatus('success'); setTestPushMessage(res.data.message ?? (res.data.sent != null ? `Sent to ${res.data.sent} device(s).` : 'Check your browser/tray.')); } else { setTestPushStatus('error'); setTestPushMessage((res.data.error ?? 'Send failed')); } }
+    catch { setTestPushStatus('error'); setTestPushMessage('Network or server error.'); }
+    setTimeout(() => { setTestPushStatus('idle'); setTestPushMessage(null); }, 6000);
+  };
+  const runCleanup = async () => {
+    if (cleanupStatus === 'running') return;
+    if (!window.confirm('Clean up your account? Removes duplicate symbol entries and stops orphan watches.')) return;
+    setCleanupStatus('running'); setCleanupMessage(null);
     try {
-      const res = await axios.post<{ success: boolean; message?: string; error?: string; sent?: number; failed?: number; scheduled?: boolean; delaySeconds?: number }>(
-        '/api/push-test',
-        delaySeconds > 0 ? { delaySeconds } : {},
-      );
-      if (res.data.success) {
-        setTestPushStatus('success');
-        const msg = res.data.message ?? (res.data.sent != null ? `Sent to ${res.data.sent} device(s). Check browser or system tray.` : 'Check your browser or system tray.');
-        setTestPushMessage(msg);
-        // Show a local notification only for immediate test (not delayed "when closed" test)
-        if (!res.data.scheduled && res.data.sent && res.data.sent > 0 && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-          try {
-            new Notification('🔔 SignalStack – Test notification', {
-              body: "If you see this, browser notifications are working. You'll get crossover alerts the same way.",
-              icon: '/signalstack-logo.png',
-              tag: 'signalstack-test-local',
-            });
-          } catch { /* ignore */ }
-        }
-        setTimeout(() => { setTestPushStatus('idle'); setTestPushMessage(null); }, res.data.scheduled ? 10000 : 6000);
-      } else {
-        setTestPushStatus('error');
-        const errMsg = res.data.error ?? 'Send failed';
-        setTestPushMessage(errMsg.includes('Enable alerts') ? 'No subscriptions on server. Click "Enable alerts", then try again.' : errMsg);
-        setTimeout(() => { setTestPushStatus('idle'); setTestPushMessage(null); }, 6000);
-      }
-    } catch (err: unknown) {
-      setTestPushStatus('error');
-      const resData = err && typeof err === 'object' && 'response' in err && err.response && typeof err.response === 'object' && 'data' in err.response
-        ? (err.response as { data?: { error?: string }; status?: number }).data
-        : null;
-      const msg = resData?.error ?? (resData ? 'Request failed' : 'Network or server error. Try again.');
-      setTestPushMessage(msg);
-      setTimeout(() => { setTestPushStatus('idle'); setTestPushMessage(null); }, 6000);
-    }
+      const res = await axios.post<{ success: boolean; duplicatesRemoved?: string[]; orphansStopped?: string[]; error?: string }>('/api/user/cleanup', {});
+      if (res.data.success) { const d = res.data.duplicatesRemoved ?? []; const o = res.data.orphansStopped ?? []; setCleanupStatus('success'); setCleanupMessage(d.length || o.length ? [d.length && `Removed ${d.length} duplicate(s)`, o.length && `Stopped ${o.length} orphan(s)`].filter(Boolean).join(' · ') : 'Already tidy.'); if (userId) refetchWatches(); }
+      else { setCleanupStatus('error'); setCleanupMessage(res.data.error ?? 'Cleanup failed'); }
+    } catch (e: any) { setCleanupStatus('error'); setCleanupMessage(e?.response?.data?.error ?? 'Cleanup failed'); }
+    setTimeout(() => { setCleanupStatus('idle'); setCleanupMessage(null); }, 8000);
   };
 
-  type CombinedAlert =
-    | { kind: 'crossover'; data: AlertData }
-    | { kind: 'rsi'; data: RsiAlertData };
-  const combinedAlerts = useMemo<CombinedAlert[]>(() => {
-    const xs: CombinedAlert[] = [];
+  /* ---------- Derived for view ---------- */
+  type Combined = { kind: 'crossover'; data: AlertData } | { kind: 'rsi'; data: RsiAlertData };
+  const combinedAlerts = useMemo<Combined[]>(() => {
+    const xs: Combined[] = [];
     for (const a of alerts) xs.push({ kind: 'crossover', data: a });
     for (const a of rsiAlerts) xs.push({ kind: 'rsi', data: a });
     xs.sort((a, b) => new Date(b.data.timestamp).getTime() - new Date(a.data.timestamp).getTime());
-    return xs.slice(0, 200);
+    return xs;
   }, [alerts, rsiAlerts]);
 
-  const runCleanup = async () => {
-    if (cleanupStatus === 'running') return;
-    const ok = window.confirm(
-      "Clean up your account?\n\nThis removes duplicate symbol entries (e.g. \"NIFTY 50\" + \"Nifty 50\") and stops any orphaned watches that aren't in your current symbol list.\n\nSafe and reversible — duplicates just take the entry with more EMAs configured.",
-    );
-    if (!ok) return;
-    setCleanupStatus('running');
-    setCleanupMessage(null);
-    try {
-      const res = await axios.post<{ success: boolean; duplicatesRemoved?: string[]; orphansStopped?: string[]; error?: string }>(
-        '/api/user/cleanup',
-        {},
-      );
-      if (res.data.success) {
-        const dups = res.data.duplicatesRemoved ?? [];
-        const orphans = res.data.orphansStopped ?? [];
-        if (dups.length === 0 && orphans.length === 0) {
-          setCleanupStatus('success');
-          setCleanupMessage('Nothing to clean — your account is already tidy.');
-        } else {
-          const parts: string[] = [];
-          if (dups.length > 0) parts.push(`Removed ${dups.length} duplicate(s): ${dups.join(', ')}`);
-          if (orphans.length > 0) parts.push(`Stopped ${orphans.length} orphan watch(es): ${orphans.join(', ')}`);
-          setCleanupStatus('success');
-          setCleanupMessage(parts.join(' · '));
-          // Refresh local state to reflect the cleanup
-          if (userId) refetchWatches();
-          hasRestoredRef.current = false;
-          hasRestoredMonitoredRef.current = false;
-        }
-        setTimeout(() => { setCleanupStatus('idle'); setCleanupMessage(null); }, 10000);
-      } else {
-        setCleanupStatus('error');
-        setCleanupMessage(res.data.error ?? 'Cleanup failed');
-        setTimeout(() => { setCleanupStatus('idle'); setCleanupMessage(null); }, 6000);
+  const todayAlerts = useMemo(
+    () => combinedAlerts.filter((item) => isTodayTimestamp(item.data.timestamp)),
+    [combinedAlerts],
+  );
+
+  const todayAlertItems = useMemo<TodayAlertItem[]>(() => {
+    return todayAlerts.map((item) => {
+      const at = new Date(item.data.timestamp);
+      const time = at.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false });
+      const day = at.toLocaleDateString('en-IN', { weekday: 'short' });
+      if (item.kind === 'crossover') {
+        const a = item.data;
+        return {
+          id: a.id,
+          kind: 'ema' as const,
+          symbol: a.symbol,
+          bull: a.crossoverType === 'bullish',
+          fastPeriod: a.fastPeriod,
+          slowPeriod: a.slowPeriod,
+          timeframe: a.timeframe,
+          time,
+          day,
+          price: a.price,
+          currency: a.currency,
+        };
       }
-    } catch (err: any) {
-      setCleanupStatus('error');
-      setCleanupMessage(err?.response?.data?.error ?? err?.message ?? 'Cleanup failed');
-      setTimeout(() => { setCleanupStatus('idle'); setCleanupMessage(null); }, 6000);
-    }
+      const a = item.data;
+      return {
+        id: a.id,
+        kind: 'rsi' as const,
+        symbol: a.symbol,
+        bull: a.direction === 'bullish',
+        signalType: a.signalType,
+        period: a.period,
+        rsiValue: a.rsiValue,
+        timeframe: a.timeframe,
+        time,
+        day,
+        price: a.price,
+        currency: a.currency,
+      };
+    });
+  }, [todayAlerts]);
+
+  const stackedFor = (sym: string): 'bull' | 'bear' | null => {
+    const tf = getTimeframe(sym); const vals = emaByKey[watchKey(sym, tf)]; const periods = (emasBySymbol[sym] ?? []).map((e) => e.period).sort((a, b) => a - b);
+    if (!vals || periods.length < 2) return null;
+    const f = vals[periods[0]]; const s = vals[periods[1]];
+    if (f == null || s == null) return null;
+    return f >= s ? 'bull' : 'bear';
   };
+  const rsiFor = (sym: string): number | null => { const tf = getTimeframe(sym); return rsiByKey[watchKey(sym, tf)]?.value ?? null; };
 
-  const crossoverPairs = useMemo((): [EMA, EMA][] => {
-    const pairs: [EMA, EMA][] = [];
-    const sorted = [...emas].sort((a, b) => a.period - b.period);
-    for (let i = 0; i < sorted.length; i++)
-      for (let j = i + 1; j < sorted.length; j++)
-        pairs.push([sorted[i], sorted[j]]);
-    return pairs;
-  }, [emas]);
+  const sortedEmaPeriods = useMemo(() => emas.map((e) => e.period).sort((a, b) => a - b), [emas]);
+  const spotFastP = sortedEmaPeriods[0]; const spotSlowP = sortedEmaPeriods[1];
+  const spotFastVal = spotFastP != null ? (displayEmaValues[spotFastP] ?? null) : null;
+  const spotSlowVal = spotSlowP != null ? (displayEmaValues[spotSlowP] ?? null) : null;
 
-  // ===================================
-  // RENDER
-  // ===================================
+  const crossoverPairs = useMemo((): [number, number][] => {
+    const ps = sortedEmaPeriods; const out: [number, number][] = [];
+    for (let i = 0; i < ps.length - 1; i++) out.push([ps[i], ps[i + 1]]);
+    return out;
+  }, [sortedEmaPeriods]);
+
+  const showLoadingModal = mounted && !!userId && restoringWatches;
+
+  /* ============================================================
+     RENDER
+     ============================================================ */
   return (
-    <div className="min-h-screen overflow-x-hidden safe-area-inset">
-      {/* Refresh modal: shown on load until data is ready */}
-      {showRefreshModal && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4"
-          style={{ background: 'rgba(0,0,0,0.4)', backdropFilter: 'blur(6px)' }}
-          aria-modal="true"
-          role="alertdialog"
-          aria-live="polite"
-        >
-          <div
-            className="max-w-sm w-full rounded-2xl p-6 text-center shadow-2xl border border-[var(--border-subtle)]"
-            style={{ backgroundColor: 'var(--bg-card)' }}
-          >
-            <RefreshCw className="w-10 h-10 mx-auto mb-4 animate-spin opacity-80" style={{ color: 'var(--accent)' }} />
-            <h3 className="font-semibold text-base mb-2" style={{ color: 'var(--text-primary)' }}>
-              Preparing your EMA watches
-            </h3>
-            <p className="text-sm leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-              This can take a bit while we fetch up to 90 days of price data and warm up EMAs for all your symbols. Please wait until this finishes.
-            </p>
-          </div>
+    <div className={`ss-root ${dark ? 'dark' : ''}`}>
+      {/* Topbar */}
+      <header className="ss-topbar">
+        <div className="ss-wordmark">
+          <span className="ss-logo">
+            <svg width={36} height={36} viewBox="0 0 40 40" fill="none" aria-hidden>
+              <g stroke="#fff" strokeWidth={3.1} strokeLinecap="round">
+                <line x1={11} y1={29} x2={11} y2={23} opacity={0.55} />
+                <line x1={17} y1={29} x2={17} y2={19} opacity={0.78} />
+                <line x1={23} y1={29} x2={23} y2={14} />
+                <line x1={29} y1={29} x2={29} y2={9} />
+              </g>
+              <circle cx={29} cy={9} r={3.1} fill="#fff" />
+            </svg>
+          </span>
+          <span className="ss-wordmark-text">
+            <span className="ss-name">Signal<span className="ss-name-accent">Stack</span></span>
+            <span className="ss-tag">EMA · RSI crossover alerts</span>
+          </span>
         </div>
-      )}
+        <div className="ss-topbar-right">
+          <LivePill connected={connected} />
+          {userId && (
+            <button type="button" className={`ss-icon-btn ${showTools ? 'active' : ''}`} onClick={() => setShowTools((s) => !s)} aria-label="Settings and tools">
+              <Settings size={18} strokeWidth={2} />
+            </button>
+          )}
+          <UserButton appearance={{ elements: { avatarBox: 'w-9 h-9' } }} />
+        </div>
+      </header>
 
-      <div className="max-w-6xl mx-auto w-full min-w-0 px-4 sm:px-5">
-
-        {/* ─── HEADER: title + user profile on one line; action buttons on next row ─── */}
-        <header className="mb-4 sm:mb-5">
-          {/* Row 1: Logo + title (left), User profile (right) — same line */}
-          <div className="flex items-center justify-between gap-3 min-w-0">
-            <div className="flex items-center gap-2 min-w-0">
-              <img src="/signalstack-logo.png" alt="Logo" className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl flex-shrink-0" />
-              <div className="min-w-0">
-                <h1 className="text-base sm:text-lg font-bold truncate" style={{ color: 'var(--text-primary)' }}>SignalStack</h1>
-                <p className="text-[11px] sm:text-xs font-semibold tracking-wider uppercase" style={{ color: 'var(--text-muted)' }}>EMA + RSI Alerts</p>
-              </div>
-            </div>
-            <div className="flex-shrink-0">
-              <UserButton
-                appearance={{
-                  elements: { avatarBox: 'w-9 h-9' },
-                  variables: {
-                    colorPrimary: '#2563eb',
-                    colorBackground: '#ffffff',
-                    colorText: '#0f172a',
-                    colorTextSecondary: '#475569',
-                  },
-                }}
-              />
-            </div>
+      <main className="ss-content">
+        {monitorStatus ? (
+          <div className="ss-banner">
+            <span className="ss-banner-text">{monitorStatus}</span>
           </div>
-          {/* Row 2: compact status strip — Live + Alerts toggle + Settings toggle */}
-          <div className="flex items-center gap-2 mt-3 min-w-0">
-            <div
-              className={`inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1.5 rounded-full border flex-shrink-0 ${connected ? 'border-green-600/30 text-green-700' : 'border-red-600/30 text-red-700'}`}
-              style={{ background: connected ? 'var(--green-bg)' : 'var(--red-bg)' }}
-              title={connected ? 'Real-time updates connected' : 'Not connected to the Node server.'}
-            >
-              <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${connected ? 'bg-green-500 anim-live' : 'bg-red-500'}`} />
-              <span>{connected ? 'Live' : 'Offline'}</span>
-            </div>
+        ) : null}
 
-            {mounted && 'serviceWorker' in navigator && pushAvailable !== false && (
-              <button
-                type="button"
-                onClick={pushEnabled ? disablePush : enablePush}
-                className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border text-xs font-semibold flex-shrink-0"
-                style={{
-                  borderColor: pushEnabled ? 'rgba(22,163,74,0.5)' : 'var(--border-subtle)',
-                  background: pushEnabled ? 'var(--green-bg)' : 'transparent',
-                  color: pushEnabled ? 'var(--green)' : 'var(--text-secondary)',
-                }}
-                title={pushEnabled ? 'Notifications on — tap to turn off' : 'Tap to enable browser + email notifications'}
-                aria-pressed={pushEnabled}
-              >
-                <Bell className="w-3.5 h-3.5" />
-                <span>{pushEnabled ? 'Notifications on' : 'Notifications off'}</span>
+        {/* tools drawer */}
+        {userId && showTools && (
+          <div className="cfg-card" style={{ marginBottom: 16 }}>
+            <div className="tools">
+              {mounted && 'serviceWorker' in navigator && pushAvailable !== false && (
+                <button type="button" className={`tool-tile ${pushEnabled ? 'active' : ''}`} onClick={pushEnabled ? disablePush : enablePush}>
+                  <Bell size={16} /><span>{pushEnabled ? 'Notifications on' : 'Enable notifications'}</span>
+                </button>
+              )}
+              <button type="button" className="tool-tile" onClick={() => setDark((d) => !d)}>
+                {dark ? <Sun size={16} /> : <Moon size={16} />}<span>{dark ? 'Light mode' : 'Dark mode'}</span>
               </button>
-            )}
-
-            {mounted && pushAvailable === false && (
-              <span className="text-[11px] px-2 py-1 rounded-full border border-amber-600/30 text-amber-700 flex-shrink-0" title="Server is missing VAPID keys">
-                Alerts unavailable
-              </span>
-            )}
-
-            <div className="flex-1" />
-
-            {userId && (
-              <button
-                type="button"
-                onClick={() => setShowSettings((s) => !s)}
-                aria-expanded={showSettings}
-                aria-controls="header-tools-drawer"
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-semibold flex-shrink-0"
-                style={{
-                  borderColor: showSettings ? 'var(--accent)' : 'var(--border-subtle)',
-                  color: showSettings ? 'var(--accent)' : 'var(--text-secondary)',
-                  background: showSettings ? 'rgba(14,165,233,0.06)' : 'transparent',
-                }}
-                title="Tools: test alerts, download log"
-              >
-                <Settings className="w-3.5 h-3.5" />
-                <span>Tools</span>
-                <ChevronDown className={`w-3 h-3 transition-transform ${showSettings ? 'rotate-180' : ''}`} />
+              <button type="button" className="tool-tile" onClick={sendTestEmail} disabled={testEmailStatus === 'sending'}>
+                <Mail size={16} /><span>{testEmailStatus === 'sending' ? 'Sending…' : testEmailStatus === 'success' ? 'Email sent' : testEmailStatus === 'error' ? 'Email failed' : 'Test email'}</span>
               </button>
-            )}
-          </div>
-        </header>
-
-        {/* Tools drawer — test buttons, alert log download */}
-        {userId && showSettings && (
-          <div
-            id="header-tools-drawer"
-            className="card !p-3 sm:!p-4 mb-3 sm:mb-4 anim-fade-up"
-          >
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
-              <button
-                type="button"
-                onClick={sendTestEmail}
-                disabled={testEmailStatus === 'sending'}
-                className="tool-tile"
-                title="Send a test email to verify delivery"
-              >
-                <Mail className="w-4 h-4" style={{ color: 'var(--accent)' }} />
-                <span>{testEmailStatus === 'sending' ? 'Sending…' : testEmailStatus === 'success' ? 'Email sent' : testEmailStatus === 'error' ? 'Email failed' : 'Test email'}</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => sendTestPush(0)}
-                disabled={testPushStatus === 'sending' || !pushEnabled}
-                className="tool-tile"
-                title={pushEnabled ? 'Send a test push notification now' : 'Enable notifications first'}
-              >
-                <Bell className="w-4 h-4" style={{ color: 'var(--accent)' }} />
-                <span>Test push now</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => sendTestPush(60)}
-                disabled={testPushStatus === 'sending' || !pushEnabled}
-                className="tool-tile"
-                title="Send a test push in 1 minute (verify with browser closed)"
-              >
-                <Bell className="w-4 h-4" style={{ color: 'var(--accent)' }} />
-                <span>Test push later</span>
-              </button>
-              <a
-                href="/api/alert-log"
-                download
-                className="tool-tile"
-                title="Download crossover alert log (xlsx)"
-              >
-                <Download className="w-4 h-4" style={{ color: 'var(--accent)' }} />
-                <span>Download log</span>
-              </a>
-              <button
-                type="button"
-                onClick={runCleanup}
-                disabled={cleanupStatus === 'running'}
-                className="tool-tile"
-                title="Remove duplicate symbol entries and stop orphan watches"
-              >
-                <Sparkles className="w-4 h-4" style={{ color: 'var(--purple)' }} />
-                <span>
-                  {cleanupStatus === 'running' ? 'Cleaning…' : cleanupStatus === 'success' ? 'Cleaned!' : cleanupStatus === 'error' ? 'Failed' : 'Tidy account'}
-                </span>
-              </button>
+              <button type="button" className="tool-tile" onClick={() => sendTestPush(0)} disabled={testPushStatus === 'sending' || !pushEnabled}><Bell size={16} /><span>Test push now</span></button>
+              <button type="button" className="tool-tile" onClick={() => sendTestPush(60)} disabled={testPushStatus === 'sending' || !pushEnabled}><Bell size={16} /><span>Test push later</span></button>
+              <a href="/api/alert-log" download className="tool-tile"><Download size={16} /><span>Download log</span></a>
+              <button type="button" className="tool-tile" onClick={runCleanup} disabled={cleanupStatus === 'running'}><Sparkles size={16} /><span>{cleanupStatus === 'running' ? 'Cleaning…' : cleanupStatus === 'success' ? 'Cleaned!' : 'Tidy account'}</span></button>
             </div>
             {(testEmailMessage || testPushMessage || cleanupMessage) && (
-              <div className="mt-3 text-[11px] leading-snug space-y-1" style={{ color: 'var(--text-muted)' }}>
+              <div className="tools-msg">
                 {testEmailMessage && <div>Email: {testEmailMessage}</div>}
                 {testPushMessage && <div>Push: {testPushMessage}</div>}
                 {cleanupMessage && <div>Cleanup: {cleanupMessage}</div>}
@@ -1568,1030 +745,341 @@ export default function EMAAlertSystem() {
           </div>
         )}
 
-        {/* ─── MONITORING / STATUS BANNER — subtle pill-style strip ─── */}
-        {(isMonitoring || monitorStatus) && (
-          <div className="mb-3 sm:mb-4 px-3 py-2 rounded-lg flex items-center justify-between gap-2 border"
-            style={{ background: 'var(--bg-card)', borderColor: 'var(--border-subtle)' }}>
-            <div className="flex items-center gap-2 min-w-0 flex-1">
-              <span className="relative flex-shrink-0 w-2 h-2">
-                <span className="absolute inset-0 w-2 h-2 bg-green-500 rounded-full" />
-                <span className="absolute inset-0 w-2 h-2 bg-emerald-400 rounded-full animate-ping" />
-              </span>
-              <span className="text-xs font-medium truncate" style={{ color: 'var(--text-secondary)' }}>
-                {monitorStatus || `Monitoring ${monitoredSymbols.size} symbol${monitoredSymbols.size === 1 ? '' : 's'}`}
-              </span>
-            </div>
-            {isMonitoring && (
-              <button
-                onClick={stopMonitoring}
-                className="flex-shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold"
-                style={{ color: 'var(--red)' }}
-                title="Stop monitoring all symbols"
-              >
-                <Power className="w-3 h-3" />
-                <span>Stop all</span>
-              </button>
-            )}
-          </div>
-        )}
-
-        {/* ─── SEARCH BAR + EXCHANGE FILTER (mobile can be collapsed; always visible on desktop) ─── */}
-        <div
-          className={`mb-3 sm:mb-4 ${showSearchMobile ? 'block' : 'hidden sm:block'} ${showSearch && searchResults.length > 0 ? 'relative z-[100]' : ''}`}
-        >
-          <div className="card !p-3 sm:!p-4" ref={searchContainerRef}>
-            <div className="flex flex-col sm:flex-row gap-2 sm:gap-2 sm:items-center">
-              <div className="relative min-w-0 w-full sm:w-[75%]">
-                <input
-                  ref={searchInputRef}
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => { setSearchQuery(e.target.value); debouncedSearch(e.target.value); }}
-                  onFocus={() => { if (searchResults.length > 0) setShowSearch(true); }}
-                  onBlur={() => { setTimeout(() => setShowSearch(false), 180); }}
-                  className={`input-field !py-2.5 sm:!py-3 text-sm sm:text-base font-semibold w-full ${searchQuery.trim().length > 0 ? 'pr-9' : 'pr-10'}`}
-                  placeholder="Search symbols (e.g. RELIANCE)"
-                  aria-autocomplete="list"
-                  aria-controls={showSearch && searchResults.length > 0 ? 'search-results-listbox' : undefined}
+        {symbols.length === 0 ? (
+          <EmptyState onAdd={() => setSearchOpen(true)} />
+        ) : tab === 'live' ? (
+          <>
+          <div className="dash">
+            <div className="dash-main">
+              {displaySymbol && (
+                <Spotlight
+                  symbol={displaySymbol}
+                  name={symbols.find((s) => s.symbol === displaySymbol)?.name}
+                  exchange={getExchange(displaySymbol)}
+                  currency={symbols.find((s) => s.symbol === displaySymbol)?.currency ?? 'INR'}
+                  price={displayPrice?.price ?? null}
+                  change={displayPrice?.change ?? 0}
+                  changePercent={displayPrice?.changePercent ?? 0}
+                  flash={flashByKey[displayKey] ?? ''}
+                  priceError={displayPrice ? undefined : displayPriceError}
+                  timeframe={displayTimeframe}
+                  timeframes={TIMEFRAMES}
+                  onTimeframe={(tf) => changeTimeframe(displaySymbol, tf)}
+                  fastPeriod={spotFastP}
+                  slowPeriod={spotSlowP}
+                  fastVal={spotFastVal}
+                  slowVal={spotSlowVal}
+                  rsi={liveRsi?.value ?? null}
+                  rsiPeriod={liveRsi?.period ?? parseInt(rsiUi.period || '14', 10)}
+                  connected={connected}
                 />
-                {searchQuery.trim().length > 0 ? (
-                  <button
-                    type="button"
-                    onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); setSearchQuery(''); setShowSearch(false); setSearchResults([]); searchInputRef.current?.focus(); }}
-                    className="absolute right-2.5 sm:right-3 top-1/2 -translate-y-1/2 p-1.5 rounded-full hover:bg-black/5 z-10"
-                    style={{ color: 'var(--text-muted)' }}
-                    aria-label="Clear search"
-                  >
-                    <X className="w-4 h-4 sm:w-5 sm:h-5" />
-                  </button>
-                ) : (
-                  <Search className={`absolute right-3 sm:right-4 top-1/2 -translate-y-1/2 w-4 h-4 sm:w-5 sm:h-5 pointer-events-none ${isSearching ? 'animate-spin' : ''}`} style={{ color: 'var(--text-muted)' }} />
-                )}
-              </div>
-              <div className="flex flex-row items-center gap-2 w-full sm:w-[25%] min-w-0">
-                <label htmlFor="search-exchange-filter" className="text-[10px] sm:text-xs font-medium uppercase tracking-wide flex-shrink-0 whitespace-nowrap" style={{ color: 'var(--text-muted)' }}>
-                  Exchange
-                </label>
-                <select
-                  id="search-exchange-filter"
-                  value={searchExchangeFilter}
-                  onChange={(e) => { const v = e.target.value as 'ALL' | 'NSE' | 'NFO' | 'BSE'; setSearchExchangeFilter(v); if (searchQuery.trim()) debouncedSearch(searchQuery); }}
-                  className="input-field !py-2 sm:!py-3 text-sm font-medium rounded-lg cursor-pointer w-full min-w-0 flex-1"
-                  style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', color: 'var(--text-primary)' }}
-                  title="Filter search results by exchange (All, NSE, NFO, BSE)"
-                  aria-label="Filter search by exchange"
-                >
-                  <option value="ALL">All</option>
-                  <option value="NSE">NSE</option>
-                  <option value="NFO">NFO</option>
-                  <option value="BSE">BSE</option>
-                </select>
-                {/* Close search / collapse search panel on mobile */}
-                <button
-                  type="button"
-                  onMouseDown={(e) => { e.preventDefault(); setShowSearch(false); setShowSearchMobile(false); setSearchQuery(''); setSearchResults([]); }}
-                  className="sm:hidden p-2 rounded-lg flex-shrink-0 touch-manipulation"
-                  style={{ color: 'var(--text-muted)' }}
-                  aria-label="Close search"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-            <div className="relative">
-              {showSearch && searchResults.length > 0 && (
-                <div id="search-results-listbox" className="absolute top-full left-0 right-0 mt-2 search-drop max-h-64 overflow-y-auto z-[110] rounded-xl shadow-xl" style={{ background: 'var(--bg-card)', border: '1px solid var(--border-subtle)' }} role="listbox">
-                  {searchResults.length > 0 ? (
-                    searchResults.map((r, i) => (
-                      <button
-                        key={`${r.symbol}-${r.exchange || ''}-${i}`}
-                        type="button"
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => { addSymbol(r); setShowSearchMobile(false); }}
-                        className="w-full px-4 py-3 text-left transition-colors first:rounded-t-xl last:rounded-b-xl hover:bg-slate-100"
-                        style={{ borderBottom: '1px solid var(--border-subtle)' }}
-                        role="option"
-                        aria-selected={false}
-                      >
-                        <div className="flex justify-between items-center gap-3">
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-1.5 min-w-0">
-                              <span className="font-bold text-sm truncate" style={{ color: 'var(--accent)' }}>{r.symbol}</span>
-                              {(() => {
-                                const meta = getOptionMeta(r.symbol, r.exchange);
-                                if (!meta.isOption || !meta.side) return null;
-                                return (
-                                  <span
-                                    className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full flex-shrink-0"
-                                    style={{
-                                      background: meta.side === 'CE' ? 'rgba(59,130,246,0.15)' : 'rgba(248,113,113,0.15)',
-                                      color: meta.side === 'CE' ? '#1d4ed8' : '#b91c1c',
-                                    }}
-                                  >
-                                    {meta.side}
-                                  </span>
-                                );
-                              })()}
-                            </div>
-                            <span className="text-xs sm:text-sm block mt-0.5 truncate" style={{ color: 'var(--text-secondary)' }}>{r.name}</span>
-                          </div>
-                          <div className="text-right flex flex-col items-end gap-0.5 flex-shrink-0">
-                            <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full"
-                              style={{ background: 'rgba(251,191,36,0.15)', color: 'var(--amber)' }}>
-                              {r.exchange}
-                            </span>
-                            <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>{r.currency}</span>
-                          </div>
-                        </div>
-                      </button>
-                    ))
-                  ) : (
-                    <div className="px-4 py-4 text-center text-sm" style={{ color: 'var(--text-muted)' }}>
-                      {isSearching ? 'Searching…' : 'No symbols found. Try e.g. RELIANCE or NIFTY 50.'}
+              )}
+
+              {/* panels */}
+              <div className="panels">
+                <div className="detail-grid">
+                  <div className="panel">
+                    <div className="panel-head">
+                      <span className="panel-title"><Layers size={14} strokeWidth={2.2} /> EMA stack</span>
+                      {stackedFor(displaySymbol ?? '') && <span className={`stack-state ${stackedFor(displaySymbol ?? '')}`}>{stackedFor(displaySymbol ?? '') === 'bull' ? 'Bullish' : 'Bearish'}</span>}
                     </div>
-                  )}
+                    <div className="ema-vals">
+                      {emas.length === 0 ? (
+                        <div className="ema-empty">No EMAs yet — add them in Indicators.</div>
+                      ) : [...emas].sort((a, b) => a.period - b.period).map((e) => {
+                        const warm = displaySymbol ? (warmupByKey[displayKey]?.[e.period] ?? (monitoredSymbols.has(displaySymbol) ? 0 : 1)) : 1;
+                        const val = displayEmaValues[e.period];
+                        const ready = warm >= 1;
+                        return (
+                          <div key={e.id} className="ema-val-row">
+                            <span className="ema-dot" style={{ background: e.color }} />
+                            <span className="ema-period">EMA {e.period}</span>
+                            <div className="ema-bar"><span style={{ width: `${Math.round(warm * 100)}%`, background: e.color }} /></div>
+                            <span className="ema-num">{ready && val != null ? val.toFixed(2) : `${Math.round(warm * 100)}%`}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <div className="panel">
+                    <div className="panel-head"><span className="panel-title"><Activity size={14} strokeWidth={2.2} /> RSI ({liveRsi?.period ?? rsiUi.period})</span></div>
+                    <RsiMeter value={liveRsi?.value ?? null} period={liveRsi?.period ?? parseInt(rsiUi.period || '14', 10)} warmup={liveRsi?.warmupProgress ?? 1}
+                      overbought={parseInt(rsiUi.overbought || '70', 10)} oversold={parseInt(rsiUi.oversold || '30', 10)} />
+                  </div>
                 </div>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* ─── SYMBOL PICKER (mobile: dropdown, desktop: tabs) ─── */}
-        {/* Mobile: single dropdown + actions, no horizontal scroll */}
-        <div className="card mb-4 !p-3 sm:hidden">
-          <div className="flex flex-col gap-2">
-            <div className="flex items-center gap-2">
-              <span className="text-[11px] font-medium uppercase tracking-wide flex-shrink-0" style={{ color: 'var(--text-muted)' }}>
-                Symbol
-              </span>
-              <div className="flex-1 min-w-0">
-                {symbols.length === 0 ? (
-                  <button
-                    type="button"
-                    onClick={() => { setShowSearchMobile(true); setShowSearch(true); queueMicrotask(() => searchInputRef.current?.focus()); }}
-                    className="input-field flex items-center justify-between gap-2 text-sm font-semibold"
-                  >
-                    <span className="inline-flex items-center gap-1.5">
-                      <Plus className="w-4 h-4" />
-                      Add symbol
-                    </span>
-                  </button>
-                ) : (
-                  <select
-                    className="input-field text-sm font-semibold"
-                    value={displaySymbol ?? symbols[0].symbol}
-                    onChange={(e) => setSelectedSymbol(e.target.value)}
-                  >
-                    {symbols.map((s) => (
-                      <option key={s.symbol} value={s.symbol}>
-                        {s.symbol}
-                        {s.exchange ? ` · ${s.exchange}` : ''}
-                      </option>
-                    ))}
-                  </select>
-                )}
-              </div>
-            </div>
-            <div className="flex items-center justify-end gap-1.5 sm:gap-2">
-              <button
-                type="button"
-                onClick={() => { setShowSearch(true); setShowSearchMobile(true); setReplacingSymbol(null); queueMicrotask(() => searchInputRef.current?.focus()); }}
-                className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold min-h-[40px]"
-                style={{ background: 'var(--accent)', color: '#fff' }}
-                title="Add new symbol"
-                aria-label="Add new symbol"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Add</span>
-              </button>
-              {symbols.length > 0 && displaySymbol && (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setShowSearch(true);
-                      setShowSearchMobile(true);
-                      setReplacingSymbol(displaySymbol);
-                      queueMicrotask(() => searchInputRef.current?.focus());
-                    }}
-                    className="inline-flex items-center justify-center w-10 h-10 rounded-lg border"
-                    style={{ borderColor: 'var(--border-subtle)', color: 'var(--text-secondary)' }}
-                    title={`Replace ${displaySymbol} with another symbol`}
-                    aria-label={`Replace ${displaySymbol}`}
-                  >
-                    <Pencil className="w-4 h-4" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => displaySymbol && removeSymbol(displaySymbol)}
-                    className="inline-flex items-center justify-center w-10 h-10 rounded-lg border"
-                    style={{ borderColor: 'rgba(220,38,38,0.3)', color: 'var(--red)' }}
-                    title={`Remove ${displaySymbol}`}
-                    aria-label={`Remove ${displaySymbol}`}
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Desktop / tablet: tab strip */}
-        <div className="card mb-4 !p-0 overflow-hidden hidden sm:block">
-          <div className="flex border-b overflow-x-auto no-scrollbar" style={{ borderColor: 'var(--border-subtle)', WebkitOverflowScrolling: 'touch' }}>
-            {symbols.map((s) => (
-              <div
-                key={s.symbol}
-                role="button"
-                tabIndex={0}
-                onClick={() => setSelectedSymbol(s.symbol)}
-                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedSymbol(s.symbol); } }}
-                className="flex items-center gap-2 px-4 sm:px-5 py-3.5 min-h-[48px] text-sm font-semibold transition-colors border-b-2 min-w-0 flex-shrink-0 cursor-pointer touch-manipulation"
-                style={{
-                  borderBottomColor: selectedSymbol === s.symbol ? 'var(--accent)' : 'transparent',
-                  color: selectedSymbol === s.symbol ? 'var(--accent)' : 'var(--text-secondary)',
-                  background: selectedSymbol === s.symbol ? 'rgba(14,165,233,0.06)' : 'transparent',
-                }}
-              >
-                <div className="flex items-center gap-1.5 min-w-0">
-                  <span className="truncate">{s.symbol}</span>
-                  {(s.exchange && s.exchange !== 'NSE') && (
-                    <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full flex-shrink-0"
-                      style={{ background: 'rgba(251,191,36,0.15)', color: 'var(--amber)' }}>
-                      {s.exchange}
-                    </span>
-                  )}
-                  {(() => {
-                    const meta = getOptionMeta(s.symbol, s.exchange);
-                    if (!meta.isOption) return null;
-                    return meta.side ? (
-                      <span
-                        className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full flex-shrink-0"
-                        style={{
-                          background: meta.side === 'CE' ? 'rgba(59,130,246,0.15)' : 'rgba(248,113,113,0.15)',
-                          color: meta.side === 'CE' ? '#1d4ed8' : '#b91c1c',
-                        }}
-                      >
-                        {meta.side}
-                      </span>
-                    ) : null;
-                  })()}
-                </div>
-                {!monitoredSymbols.has(s.symbol) && (
-                  <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); removeSymbol(s.symbol); }}
-                    className="p-0.5 rounded hover:bg-red-50 flex-shrink-0"
-                    style={{ color: 'var(--text-muted)' }}
-                    aria-label={`Remove ${s.symbol}`}
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                )}
-              </div>
-            ))}
-            <button
-              type="button"
-              onClick={() => { setShowSearchMobile(true); setShowSearch(true); queueMicrotask(() => searchInputRef.current?.focus()); }}
-              className="flex items-center gap-2 px-4 py-3 sm:py-3.5 min-h-[44px] sm:min-h-[48px] text-sm font-semibold transition-colors border-b-2 flex-shrink-0 touch-manipulation"
-              style={{ color: 'var(--accent)', borderBottomColor: 'transparent', background: 'transparent' }}
-              title="Add new symbol"
-            >
-              <Plus className="w-4 h-4" />
-              <span className="hidden sm:inline">New</span>
-            </button>
-            <button
-              type="button"
-              onClick={handleReset}
-              className="flex items-center justify-center gap-1.5 px-3 sm:px-5 py-3 sm:py-3.5 min-h-[44px] sm:min-h-[48px] text-sm font-semibold transition-colors hover:bg-slate-100 flex-shrink-0 touch-manipulation"
-              style={{ color: 'var(--text-muted)', borderLeft: '1px solid var(--border-subtle)' }}
-              title="Stop monitoring and clear live data (keeps symbols and EMA setup)"
-            >
-              <RefreshCw className="w-4 h-4" />
-              <span className="hidden sm:inline">Reset</span>
-            </button>
-          </div>
-        </div>
-
-        {/* ─── TIMEFRAME + PRICE ─── */}
-        <div className="card mb-4 !p-3 sm:!p-4">
-          <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center sm:justify-between gap-3">
-            {/* Mobile: compact grid, no horizontal scroll */}
-            <div className="grid grid-cols-4 gap-2 sm:hidden">
-              {TIMEFRAMES.map((tf) => {
-                const isActive = displayTimeframe === tf.id;
-                return (
-                  <button
-                    key={tf.id}
-                    onClick={() => {
-                      if (!displaySymbol) return;
-                      const oldTf = getTimeframe(displaySymbol);
-                      const isMonitored = monitoredSymbols.has(displaySymbol);
-                      if (isMonitored && oldTf !== tf.id) {
-                        axios.delete('/api/monitor', { data: { symbol: displaySymbol, timeframe: oldTf } }).catch(() => { });
-                        setMonitoredSymbols((prev) => {
-                          const next = new Set(prev);
-                          next.delete(displaySymbol);
-                          return next;
-                        });
-                        if (userId) refetchWatches();
-                        const oldKey = watchKey(displaySymbol, oldTf);
-                        setPriceByKey((prev) => { const n = { ...prev }; delete n[oldKey]; return n; });
-                        setEmaByKey((prev) => { const n = { ...prev }; delete n[oldKey]; return n; });
-                        setWarmupByKey((prev) => { const n = { ...prev }; delete n[oldKey]; return n; });
-                        setMonitorStatus(`Monitoring stopped — start again to use ${tf.id}`);
-                        setTimeout(() => setMonitorStatus(''), 4000);
-                      }
-                      setTimeframeBySymbol((prev) => ({ ...prev, [displaySymbol]: tf.id }));
-                    }}
-                    disabled={!displaySymbol}
-                    className={`tf-btn !px-2.5 !py-2 min-h-[40px] text-sm touch-manipulation ${isActive ? 'active' : ''}`}
-                  >
-                    {tf.label}
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Desktop / tablet: horizontal pill row */}
-            <div className="hidden sm:flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1" style={{ WebkitOverflowScrolling: 'touch' }}>
-              {TIMEFRAMES.map((tf) => (
-                <button
-                  key={tf.id}
-                  onClick={() => {
-                    if (!displaySymbol) return;
-                    const oldTf = getTimeframe(displaySymbol);
-                    const isMonitored = monitoredSymbols.has(displaySymbol);
-                    if (isMonitored && oldTf !== tf.id) {
-                      axios.delete('/api/monitor', { data: { symbol: displaySymbol, timeframe: oldTf } }).catch(() => { });
-                      setMonitoredSymbols((prev) => {
-                        const next = new Set(prev);
-                        next.delete(displaySymbol);
-                        return next;
-                      });
-                      if (userId) refetchWatches();
-                      const oldKey = watchKey(displaySymbol, oldTf);
-                      setPriceByKey((prev) => { const n = { ...prev }; delete n[oldKey]; return n; });
-                      setEmaByKey((prev) => { const n = { ...prev }; delete n[oldKey]; return n; });
-                      setWarmupByKey((prev) => { const n = { ...prev }; delete n[oldKey]; return n; });
-                      setMonitorStatus(`Monitoring stopped — start again to use ${tf.id}`);
-                      setTimeout(() => setMonitorStatus(''), 4000);
-                    }
-                    setTimeframeBySymbol((prev) => ({ ...prev, [displaySymbol]: tf.id }));
-                  }}
-                  disabled={!displaySymbol}
-                  className={`tf-btn !px-3 sm:!px-4 !py-2.5 min-h-[44px] text-sm flex-shrink-0 touch-manipulation ${displayTimeframe === tf.id ? 'active' : ''}`}
-                >
-                  {tf.label}
+                <button type="button" className="detail-config-btn" onClick={() => setTab('config')}>
+                  <Settings size={16} strokeWidth={2.2} /> Configure indicators
+                  <ChevronRight size={16} strokeWidth={2.2} style={{ marginLeft: 'auto' }} />
                 </button>
+              </div>
+            </div>
+
+            {/* watchlist */}
+            <div className="watchlist">
+              <div className="section-head"><span className="section-title">Watchlist</span><span className="section-count">{symbols.length}</span></div>
+              <div className="watch-rows">
+                {symbols.map((s) => {
+                  const tf = getTimeframe(s.symbol); const key = watchKey(s.symbol, tf); const pr = priceByKey[key];
+                  return (
+                    <WatchRow key={s.symbol}
+                      symbol={s.symbol} name={s.name} exchange={s.exchange || 'NSE'} currency={s.currency}
+                      price={pr?.price ?? null} changePercent={pr?.changePercent ?? 0} flash={flashByKey[key] ?? ''}
+                      emaPeriods={(emasBySymbol[s.symbol] ?? []).map((e) => e.period).sort((a, b) => a - b)}
+                      stacked={stackedFor(s.symbol)} rsi={rsiFor(s.symbol)}
+                      monitoring={monitoredSymbols.has(s.symbol)} selected={s.symbol === displaySymbol}
+                      onSelect={() => setSelectedSymbol(s.symbol)} />
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          <TodayAlerts items={todayAlertItems} />
+          </>
+        ) : (
+          /* ---------- Config tab ---------- */
+          <ConfigScreen
+            symbol={displaySymbol}
+            emas={emas}
+            emaAlertsEnabled={emaAlertsEnabled}
+            onToggleEma={updateEmaEnabled}
+            onAddEma={addEma}
+            onRemoveEma={removeEma}
+            newEmaPeriod={newEmaPeriod}
+            setNewEmaPeriod={setNewEmaPeriod}
+            crossoverPairs={crossoverPairs}
+            rsiUi={rsiUi}
+            updateRsi={updateRsi}
+            rsiFormError={rsiFormError}
+            trackBullish={trackBullish}
+            trackBearish={trackBearish}
+            onTrackBullish={() => { setTrackBullish((v) => !v); if (displaySymbol && monitoredSymbols.has(displaySymbol)) stopMonitoringForSymbol(displaySymbol); }}
+            onTrackBearish={() => { setTrackBearish((v) => !v); if (displaySymbol && monitoredSymbols.has(displaySymbol)) stopMonitoringForSymbol(displaySymbol); }}
+            monitoring={!!displaySymbol && monitoredSymbols.has(displaySymbol)}
+            busy={monitoringBusy || restoringWatches}
+            onToggleMonitor={toggleMonitorSelected}
+            onRemoveSymbol={() => displaySymbol && removeSymbol(displaySymbol)}
+            monitorStatus={monitorStatus}
+          />
+        )}
+      </main>
+
+      <BottomNav tab={tab} onTab={setTab} onAdd={() => setSearchOpen(true)} />
+
+      {searchOpen && (
+        <SearchSheet
+          inputRef={searchInputRef}
+          query={searchQuery}
+          onQuery={(v) => { setSearchQuery(v); debouncedSearch(v, searchExchangeFilter); }}
+          filter={searchExchangeFilter}
+          onFilter={(f) => { setSearchExchangeFilter(f); if (searchQuery.trim()) debouncedSearch(searchQuery, f); }}
+          results={searchResults}
+          isSearching={isSearching}
+          existing={symbols.map((s) => s.symbol)}
+          onAdd={addSymbol}
+          onClose={() => setSearchOpen(false)}
+        />
+      )}
+
+      {showLoadingModal && (
+        <div className="ss-modal-scrim">
+          <div className="ss-modal">
+            <RefreshCw size={36} className="ss-spin" style={{ color: 'var(--accent)', marginBottom: 14 }} />
+            <h3 style={{ fontFamily: 'var(--font-display)', fontWeight: 700, fontSize: 16, margin: '0 0 8px' }}>Preparing your watches</h3>
+            <p style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.5, margin: 0 }}>Fetching up to 90 days of price data and warming EMAs. This can take a moment.</p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+   Sub-views
+   ============================================================ */
+function EmptyState({ onAdd }: { onAdd: () => void }) {
+  return (
+    <div className="spot" style={{ textAlign: 'center', padding: '40px 24px' }}>
+      <div className="spot-glow" />
+      <h1 className="spot-symbol" style={{ fontSize: 'clamp(26px,8vw,38px)' }}>Add your first symbol</h1>
+      <p className="spot-name" style={{ maxWidth: 360, margin: '10px auto 22px' }}>
+        Search NSE, NFO or BSE, set your EMA periods and RSI, then start monitoring for crossover alerts.
+      </p>
+      <button type="button" className="monitor-cta go" style={{ maxWidth: 280, margin: '0 auto' }} onClick={onAdd}>
+        <Plus size={18} strokeWidth={2.4} /> Search symbols
+      </button>
+    </div>
+  );
+}
+
+function Toggle({ on, disabled, onChange }: { on: boolean; disabled?: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button type="button" className={`toggle ${on ? 'on' : ''}`} disabled={disabled} onClick={() => onChange(!on)} role="switch" aria-checked={on}>
+      <span className="toggle-knob" />
+    </button>
+  );
+}
+
+interface ConfigProps {
+  symbol: string | null;
+  emas: EMA[]; emaAlertsEnabled: boolean; onToggleEma: (v: boolean) => void;
+  onAddEma: (p?: number) => void; onRemoveEma: (id: number) => void;
+  newEmaPeriod: string; setNewEmaPeriod: (v: string) => void;
+  crossoverPairs: [number, number][];
+  rsiUi: RsiUiConfig; updateRsi: (u: (p: RsiUiConfig) => RsiUiConfig) => void; rsiFormError: string | null;
+  trackBullish: boolean; trackBearish: boolean; onTrackBullish: () => void; onTrackBearish: () => void;
+  monitoring: boolean; busy: boolean; onToggleMonitor: () => void; onRemoveSymbol: () => void; monitorStatus: string;
+}
+
+function ConfigScreen(p: ConfigProps) {
+  const QUICK = [9, 21, 50, 100, 200];
+  if (!p.symbol) {
+    return <div className="config"><div className="cfg-card" style={{ textAlign: 'center', color: 'var(--muted)' }}>Select or add a symbol to configure indicators.</div></div>;
+  }
+  const dirLabel = [p.trackBullish && 'Bull', p.trackBearish && 'Bear'].filter(Boolean).join(' + ') || 'None';
+  return (
+    <div className="config">
+      <div className="config-head">
+        <div>
+          <span className="config-eyebrow">Configuring</span>
+          <h2 className="config-symbol">{p.symbol}</h2>
+        </div>
+        <DirTag dir={p.trackBearish && !p.trackBullish ? 'bear' : 'bull'} label={dirLabel} />
+      </div>
+
+      {/* EMA */}
+      <div className="cfg-card">
+        <div className="cfg-card-head"><span className="cfg-title"><Layers size={16} strokeWidth={2.2} /> EMA crossover</span><Toggle on={p.emaAlertsEnabled} onChange={p.onToggleEma} /></div>
+        <div className={`cfg-body ${p.emaAlertsEnabled ? '' : 'dim'}`}>
+          <span className="cfg-label">Active periods</span>
+          <div className="ema-pills">
+            {[...p.emas].sort((a, b) => a.period - b.period).map((e) => (
+              <span key={e.id} className="ema-pill" style={{ '--pc': e.color } as React.CSSProperties}>
+                <i className="ema-pill-dot" />{e.period}
+                <button type="button" onClick={() => p.onRemoveEma(e.id)} aria-label={`Remove EMA ${e.period}`}><X size={12} strokeWidth={2.6} /></button>
+              </span>
+            ))}
+            <div className="ema-add">
+              <input inputMode="numeric" placeholder="+ add" value={p.newEmaPeriod}
+                onChange={(e) => p.setNewEmaPeriod(e.target.value.replace(/\D/g, ''))}
+                onKeyDown={(e) => { if (e.key === 'Enter') p.onAddEma(); }} />
+            </div>
+          </div>
+          <div className="quick-row">
+            {QUICK.map((q) => <button key={q} type="button" className="quick-ema" disabled={p.emas.some((e) => e.period === q)} onClick={() => p.onAddEma(q)}>{q}</button>)}
+          </div>
+          <span className="cfg-label" style={{ marginTop: 14 }}>Crossover pairs tracked</span>
+          {p.crossoverPairs.length === 0 ? (
+            <div className="pair-empty">Add at least two EMAs to track a crossover.</div>
+          ) : (
+            <div className="pair-list">
+              {p.crossoverPairs.map(([f, s]) => (
+                <div key={`${f}-${s}`} className="pair-item">
+                  <span className="pair-fast">{f}</span><Activity size={13} strokeWidth={2.2} /><span className="pair-slow">{s}</span>
+                  <span className="pair-label">fast / slow</span>
+                </div>
               ))}
             </div>
+          )}
+        </div>
+      </div>
 
-            {displaySymbol && (
-              <div className="flex flex-wrap items-center gap-2 sm:gap-3 min-w-0">
-                {isFetchingPrice ? (
-                  <RefreshCw className="w-5 h-5 animate-spin flex-shrink-0" style={{ color: 'var(--accent)' }} />
-                ) : displayPrice ? (
-                  <>
-                    <div className="flex items-center gap-1.5 flex-shrink-0 min-w-0">
-                      <span className="text-sm font-medium truncate" style={{ color: 'var(--text-muted)' }}>{displaySymbol}</span>
-                      {(() => {
-                        const meta = getOptionMeta(displaySymbol, getExchange(displaySymbol));
-                        if (!meta.isOption || !meta.side) return null;
-                        return (
-                          <span
-                            className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full flex-shrink-0"
-                            style={{
-                              background: meta.side === 'CE' ? 'rgba(59,130,246,0.15)' : 'rgba(248,113,113,0.15)',
-                              color: meta.side === 'CE' ? '#1d4ed8' : '#b91c1c',
-                            }}
-                          >
-                            {meta.side}
-                          </span>
-                        );
-                      })()}
+      {/* RSI */}
+      <div className="cfg-card">
+        <div className="cfg-card-head"><span className="cfg-title"><Activity size={16} strokeWidth={2.2} /> RSI signals</span>
+          <Toggle on={p.rsiUi.enabled} onChange={(v) => p.updateRsi((prev) => ({ ...prev, enabled: v, ...(v ? { signals: { ...DEFAULT_RSI_SIGNALS } } : {}) }))} />
+        </div>
+        <div className={`cfg-body ${p.rsiUi.enabled ? '' : 'dim'}`}>
+          <div className="rsi-fields">
+            <label className="rsi-field"><span>Period</span><input inputMode="numeric" value={p.rsiUi.period} onChange={(e) => p.updateRsi((prev) => ({ ...prev, period: e.target.value.replace(/\D/g, '') }))} /></label>
+            <label className="rsi-field"><span>Overbought</span><input inputMode="numeric" value={p.rsiUi.overbought} onChange={(e) => p.updateRsi((prev) => ({ ...prev, overbought: e.target.value.replace(/\D/g, '') }))} /></label>
+            <label className="rsi-field"><span>Oversold</span><input inputMode="numeric" value={p.rsiUi.oversold} onChange={(e) => p.updateRsi((prev) => ({ ...prev, oversold: e.target.value.replace(/\D/g, '') }))} /></label>
+          </div>
+          <span className="cfg-label" style={{ marginTop: 14 }}>Alert on</span>
+          <div className="signal-list">
+            {RSI_SIGNAL_ORDER.map((key) => {
+              const on = p.rsiUi.signals[key];
+              return (
+                <div key={key}>
+                  <button type="button" className={`signal-item ${on ? 'on' : ''}`} onClick={() => p.updateRsi((prev) => ({ ...prev, signals: { ...prev.signals, [key]: !prev.signals[key] } }))}>
+                    <span className="signal-check">{on && <Check size={13} strokeWidth={3} />}</span>
+                    {RSI_SIGNAL_LABELS_LONG[key]}
+                  </button>
+                  {key === 'signalLineCross' && on && (
+                    <div className="signal-sub">EMA length
+                      <input inputMode="numeric" value={p.rsiUi.signalLineLength} onChange={(e) => p.updateRsi((prev) => ({ ...prev, signalLineLength: e.target.value.replace(/\D/g, '') }))} />
                     </div>
-                    <span className="text-2xl sm:text-3xl font-extrabold tracking-tight truncate" style={{ color: 'var(--text-primary)', fontVariantNumeric: 'tabular-nums' }}>
-                      {getCurrencySymbol(displayPrice.currency)}{displayPrice.price.toFixed(2)}
-                    </span>
-                    <div className="flex flex-col items-end min-w-0">
-                      <span className="px-2 py-0.5 rounded text-xs font-bold whitespace-nowrap" style={{
-                        background: displayPrice.changePercent >= 0 ? 'var(--green-bg)' : 'var(--red-bg)',
-                        color: displayPrice.changePercent >= 0 ? 'var(--green)' : 'var(--red)'
-                      }}>
-                        {displayPrice.change >= 0 ? '+' : ''}{displayPrice.change.toFixed(2)} ({displayPrice.changePercent >= 0 ? '+' : ''}{displayPrice.changePercent.toFixed(2)}%)
-                      </span>
-                      <span className="text-xs mt-0.5 truncate max-w-full" style={{ color: 'var(--text-muted)' }} title={displayPrice.source + (displayPrice.lastUpdate ? ` · ${displayPrice.lastUpdate.toLocaleTimeString()}` : '')}>
-                        {displayPrice.source}{displayPrice.lastUpdate && ` · ${displayPrice.lastUpdate.toLocaleTimeString()}`}
-                      </span>
-                    </div>
-                  </>
-                ) : displayPriceError ? (
-                  <div className="flex items-center gap-2 text-xs sm:text-sm">
-                    <span className="px-2 py-1 rounded-lg font-medium flex items-center gap-1.5"
-                      style={{ background: 'var(--red-bg)', color: 'var(--red)', border: '1px solid rgba(220,38,38,0.25)' }}>
-                      <X className="w-3.5 h-3.5" />
-                      {displayPriceError}
-                    </span>
-                  </div>
-                ) : null}
-              </div>
-            )}
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {p.rsiFormError && <div className="cfg-error">{p.rsiFormError}</div>}
+        </div>
+      </div>
+
+      {/* Direction */}
+      <div className="cfg-card">
+        <div className="cfg-card-head"><span className="cfg-title"><Zap size={16} strokeWidth={2.2} /> Track direction</span></div>
+        <div className="cfg-body">
+          <div className="dir-toggles">
+            <button type="button" className={`dir-toggle bull ${p.trackBullish ? 'on' : ''}`} onClick={p.onTrackBullish}><TrendingUp size={16} strokeWidth={2.4} /> Bullish</button>
+            <button type="button" className={`dir-toggle bear ${p.trackBearish ? 'on' : ''}`} onClick={p.onTrackBearish}><TrendingDown size={16} strokeWidth={2.4} /> Bearish</button>
           </div>
         </div>
+      </div>
 
-        {/* ─── MAIN CONTENT ─── */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 sm:gap-5">
+      <button type="button" className={`monitor-cta ${p.monitoring ? 'halt' : 'go'}`} onClick={p.onToggleMonitor} disabled={p.busy}>
+        <Power size={18} strokeWidth={2.4} /> {p.monitoring ? `Stop monitoring ${p.symbol}` : `Start monitoring ${p.symbol}`}
+      </button>
+      {p.monitorStatus && <div className="cfg-status">{p.monitorStatus}</div>}
 
-          {/* ─── LEFT: EMA Config (collapsible on mobile) ─── */}
-          <div className="lg:col-span-5">
-            <div className="card !p-3 sm:!p-5">
-              <div className="flex items-center justify-between gap-2 min-w-0 mb-3 lg:mb-0">
-                <button
-                  type="button"
-                  onClick={() => setShowEmaConfig(!showEmaConfig)}
-                  className="lg:pointer-events-none flex items-center justify-between gap-2 min-w-0 flex-1"
-                >
-                  <div className="section-label flex items-center gap-2 min-w-0">
-                    <BarChart3 className="w-4 h-4 flex-shrink-0" style={{ color: 'var(--accent)' }} />
-                    <span className="truncate">EMA Periods {displaySymbol && <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>({displaySymbol})</span>}</span>
+      <button type="button" className="detail-config-btn" style={{ color: 'var(--bear)' }} onClick={p.onRemoveSymbol}>
+        <Trash2 size={16} strokeWidth={2.2} /> Remove {p.symbol} from watchlist
+      </button>
+    </div>
+  );
+}
+
+interface SearchSheetProps {
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  query: string; onQuery: (v: string) => void;
+  filter: 'ALL' | 'NSE' | 'NFO' | 'BSE'; onFilter: (f: 'ALL' | 'NSE' | 'NFO' | 'BSE') => void;
+  results: SearchResult[]; isSearching: boolean; existing: string[];
+  onAdd: (r: SearchResult) => void; onClose: () => void;
+}
+function SearchSheet(p: SearchSheetProps) {
+  const EX: Array<'ALL' | 'NSE' | 'NFO' | 'BSE'> = ['ALL', 'NSE', 'NFO', 'BSE'];
+  return (
+    <div className="sheet-scrim" onClick={p.onClose}>
+      <div className="sheet" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Add symbol">
+        <div className="sheet-grab" />
+        <div className="sheet-head"><h3>Add symbol</h3><button type="button" className="sheet-close" onClick={p.onClose} aria-label="Close"><X size={18} strokeWidth={2.4} /></button></div>
+        <div className="search-box">
+          <Search size={18} strokeWidth={2.2} />
+          <input ref={p.inputRef} value={p.query} onChange={(e) => p.onQuery(e.target.value)} placeholder="Search RELIANCE, NIFTY 50, BANKNIFTY…" />
+          {p.query && <button type="button" onClick={() => p.onQuery('')} aria-label="Clear"><X size={16} strokeWidth={2.4} /></button>}
+        </div>
+        <div className="ex-filters">{EX.map((e) => <button key={e} type="button" className={`ex-chip ${p.filter === e ? 'active' : ''}`} onClick={() => p.onFilter(e)}>{e}</button>)}</div>
+        <div className="results">
+          {p.results.length === 0 ? (
+            <div className="results-empty">{p.isSearching ? 'Searching…' : p.query ? 'No symbols found. Try “RELIANCE” or “NIFTY 50”.' : 'Type to search NSE, NFO and BSE.'}</div>
+          ) : p.results.map((r) => {
+            const added = p.existing.includes(r.symbol); const meta = optionMeta(r.symbol, r.exchange);
+            return (
+              <button key={`${r.symbol}-${r.exchange}`} type="button" className="result-row" disabled={added} onClick={() => p.onAdd(r)}>
+                <div>
+                  <div className="result-symrow">
+                    <span className="result-symbol">{r.symbol}</span>
+                    <span className={`result-exch ex-${r.exchange}`}>{r.exchange}</span>
+                    {meta.side && <span className={`result-side ${meta.side === 'CE' ? 'ce' : 'pe'}`}>{meta.side}</span>}
                   </div>
-                  <div className="flex items-center gap-2">
-                    <span className="badge flex-shrink-0" style={{ background: 'rgba(14,165,233,0.08)', color: 'var(--accent)' }}>{emas.length}</span>
-                    <span className="lg:hidden text-xs" style={{ color: 'var(--text-muted)' }}>{showEmaConfig ? '▲' : '▼'}</span>
-                  </div>
-                </button>
-                <label className="inline-flex items-center gap-2 cursor-pointer select-none flex-shrink-0" title="Enable EMA crossover alerts for this symbol">
-                  <input
-                    type="checkbox"
-                    className="w-4 h-4"
-                    checked={emaAlertsEnabled}
-                    disabled={!displaySymbol}
-                    onChange={(e) => updateEmaEnabled(e.target.checked)}
-                  />
-                  <span className="text-xs font-semibold" style={{ color: 'var(--text-secondary)' }}>
-                    {emaAlertsEnabled ? 'Enabled' : 'Off'}
-                  </span>
-                </label>
-              </div>
-
-              <div className={`${showEmaConfig ? '' : 'hidden lg:block'} mt-4`}>
-
-                {/* Quick add — horizontal scroll on narrow screens */}
-                <div className="flex gap-2 mb-3 sm:mb-4 overflow-x-auto no-scrollbar pb-1" style={{ WebkitOverflowScrolling: 'touch' }}>
-                  {[9, 21, 50, 100, 200].map((p) => (
-                    <button key={p} onClick={() => addEma(p)}
-                      disabled={!displaySymbol || !!emas.find((e) => e.period === p)}
-                      className="ema-quick flex-shrink-0 min-w-[40px] sm:min-w-[44px] text-sm touch-manipulation">
-                      {p}
-                    </button>
-                  ))}
-                  <button onClick={() => setShowAddEma(!showAddEma)}
-                    disabled={!displaySymbol}
-                    className="flex items-center justify-center w-10 sm:w-11 min-w-[40px] sm:min-w-[44px] min-h-[40px] sm:min-h-[44px] rounded-lg transition-colors disabled:opacity-50 flex-shrink-0 touch-manipulation"
-                    style={{ background: 'var(--bg-elevated)', border: '1px dashed var(--border-medium)', color: 'var(--text-secondary)' }}>
-                    <Plus className="w-4 h-4" />
-                  </button>
+                  <span className="result-name">{r.name}</span>
                 </div>
-
-                {showAddEma && (
-                  <div className="flex gap-2 mb-4 anim-fade-up">
-                    <input type="number" value={newEmaPeriod} onChange={(e) => setNewEmaPeriod(e.target.value)}
-                      className="input-field flex-1 text-sm" placeholder="Custom period" min="1" />
-                    <button onClick={() => addEma()} disabled={!newEmaPeriod || parseInt(newEmaPeriod) <= 0}
-                      className="px-5 py-2.5 rounded-lg text-sm font-bold transition-all disabled:opacity-30"
-                      style={{ background: 'var(--accent)', color: '#ffffff' }}>
-                      Add
-                    </button>
-                  </div>
-                )}
-
-                {/* EMA list */}
-                {!displaySymbol ? (
-                  <div className="text-center py-6" style={{ color: 'var(--text-muted)' }}>
-                    <BarChart3 className="w-8 h-8 mx-auto mb-2 opacity-30" />
-                    <p className="text-sm font-medium">Select a symbol above</p>
-                    <p className="text-xs mt-1 opacity-60">to set EMAs for that stock</p>
-                  </div>
-                ) : emas.length === 0 ? (
-                  <div className="text-center py-6" style={{ color: 'var(--text-muted)' }}>
-                    <BarChart3 className="w-8 h-8 mx-auto mb-2 opacity-30" />
-                    <p className="text-sm font-medium">
-                      {emaAlertsEnabled ? `Add at least 2 EMAs for ${displaySymbol}` : `Optional: add EMAs for ${displaySymbol}`}
-                    </p>
-                    <p className="text-xs mt-1 opacity-60">
-                      {emaAlertsEnabled ? 'to start monitoring crossovers' : 'or enable RSI-only alerts below'}
-                    </p>
-                  </div>
-                ) : (
-                  <div className="space-y-2 mb-4">
-                    {emas.map((ema) => (
-                      <div key={ema.id} className="flex items-center justify-between px-4 py-3 rounded-xl" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}>
-                        <div className="flex items-center gap-3 min-w-0">
-                          <div className="w-3 h-3 rounded-full flex-shrink-0" style={{ backgroundColor: ema.color, boxShadow: `0 0 8px ${ema.color}50` }} />
-                          <span className="font-bold text-sm" style={{ color: 'var(--text-primary)' }}>EMA({ema.period})</span>
-                          {displayEmaValues[ema.period] != null && (
-                            <span className="text-sm font-mono" style={{ color: 'var(--text-muted)' }}>= {displayEmaValues[ema.period]!.toFixed(2)}</span>
-                          )}
-                          {displayWarmupProgress[ema.period] !== undefined && displayWarmupProgress[ema.period] < 1 && (
-                            <div className="flex items-center gap-2">
-                              <div className="w-16 h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border-subtle)' }}>
-                                <div className="h-full rounded-full transition-all duration-500" style={{ width: `${displayWarmupProgress[ema.period] * 100}%`, background: 'var(--accent)' }} />
-                              </div>
-                              <span className="text-xs font-mono" style={{ color: 'var(--text-muted)' }}>{Math.round(displayWarmupProgress[ema.period] * 100)}%</span>
-                            </div>
-                          )}
-                        </div>
-                        <button onClick={() => removeEma(ema.id)} className="p-1.5 rounded-lg transition-colors hover:bg-red-50 flex-shrink-0"
-                          style={{ color: 'var(--text-muted)' }}
-                          onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--red)')}
-                          onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-muted)')}>
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                <div className="h-px my-4" style={{ background: 'var(--border-subtle)' }} />
-
-                {!emaAlertsEnabled ? (
-                  <p className="text-xs leading-relaxed mb-4" style={{ color: 'var(--text-muted)' }}>
-                    EMA crossover alerts are off. Enable above to alert on bullish/bearish EMA crosses,
-                    or use RSI-only monitoring below.
-                  </p>
-                ) : (
-                  <>
-                {/* Monitoring Controls — which crossovers to alert on */}
-                <div className="flex gap-2 mb-4">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setTrackBullish(!trackBullish);
-                      stopAllMonitoringFromConfigChange();
-                    }}
-                    className={`toggle-btn text-sm min-h-[48px] touch-manipulation ${trackBullish ? 'bull-on' : ''}`}
-                    aria-pressed={trackBullish}
-                    aria-label={trackBullish ? 'Alert on bullish crossovers (on)' : 'Alert on bullish crossovers (off)'}
-                  >
-                    <TrendingUp className="w-4 h-4 flex-shrink-0" />
-                    <span>Bullish</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setTrackBearish(!trackBearish);
-                      stopAllMonitoringFromConfigChange();
-                    }}
-                    className={`toggle-btn text-sm min-h-[48px] touch-manipulation ${trackBearish ? 'bear-on' : ''}`}
-                    aria-pressed={trackBearish}
-                    aria-label={trackBearish ? 'Alert on bearish crossovers (on)' : 'Alert on bearish crossovers (off)'}
-                  >
-                    <TrendingDown className="w-4 h-4 flex-shrink-0" />
-                    <span>Bearish</span>
-                  </button>
-                </div>
-                  </>
-                )}
-
-                <button
-                  onClick={() => {
-                    if (restoringWatches) {
-                      setMonitorStatus('Restoring existing monitoring from server — please wait until this finishes before changing monitors.');
-                      return;
-                    }
-                    if (monitoringBusy) {
-                      setMonitorStatus('Monitoring is already starting — please wait until it finishes before pressing the button again.');
-                      return;
-                    }
-                    if (!displaySymbol) {
-                      setMonitorStatus('Add at least one symbol to start monitoring.');
-                      return;
-                    }
-                    if (monitoredSymbols.has(displaySymbol)) {
-                      stopMonitoringForSymbol(displaySymbol);
-                    } else {
-                      startMonitoringForSymbol(displaySymbol);
-                    }
-                  }}
-                  disabled={monitoringBusy || restoringWatches}
-                  className={`cta text-base ${displaySymbol && monitoredSymbols.has(displaySymbol) ? 'halt' : 'go'} ${
-                    monitoringBusy || restoringWatches ? 'opacity-70 cursor-not-allowed' : ''
-                  }`}>
-                  {displaySymbol && monitoredSymbols.has(displaySymbol) ? (
-                    <><Power className="w-5 h-5" /> Stop monitoring {displaySymbol}</>
-                  ) : (
-                    <><Zap className="w-5 h-5" /> Start monitoring {displaySymbol || '…'}</>
-                  )}
-                </button>
-              </div>{/* end collapsible */}
-            </div>{/* end card */}
-
-            {/* ─── RSI Config Card ─── */}
-            <div className="card !p-3 sm:!p-5 mt-3 sm:mt-4">
-              <div className="flex items-center justify-between gap-2 mb-3 min-w-0">
-                <div className="section-label flex items-center gap-2 min-w-0">
-                  <Activity className="w-4 h-4 flex-shrink-0" style={{ color: 'var(--purple)' }} />
-                  <span className="truncate">
-                    RSI {displaySymbol && <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>({displaySymbol})</span>}
-                  </span>
-                </div>
-                <label className="inline-flex items-center gap-2 cursor-pointer select-none" title="Enable RSI tracking for this symbol">
-                  <input
-                    type="checkbox"
-                    className="w-4 h-4"
-                    checked={rsiUi.enabled}
-                    disabled={!displaySymbol}
-                    onChange={(e) => updateRsi((prev) => {
-                      const enabling = e.target.checked;
-                      return {
-                        ...prev,
-                        enabled: enabling,
-                        period: prev.period || RSI_DEFAULTS.period,
-                        overbought: prev.overbought || RSI_DEFAULTS.overbought,
-                        oversold: prev.oversold || RSI_DEFAULTS.oversold,
-                        signalLineLength: RSI_DEFAULTS.signalLineLength,
-                        ...(enabling ? { signals: { ...DEFAULT_RSI_SIGNALS } } : {}),
-                      };
-                    })}
-                  />
-                  <span className="text-xs font-semibold" style={{ color: 'var(--text-secondary)' }}>
-                    {rsiUi.enabled ? 'Enabled' : 'Off'}
-                  </span>
-                </label>
-              </div>
-
-              {!displaySymbol ? (
-                <div className="text-center py-4 text-xs" style={{ color: 'var(--text-muted)' }}>
-                  Select a symbol to configure RSI
-                </div>
-              ) : !rsiUi.enabled ? (
-                <p className="text-xs leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-                  RSI (Relative Strength Index, 0–100) measures momentum. Enable to set period &
-                  thresholds, and pick which signals fire alerts. Standard reference: 70 = overbought,
-                  30 = oversold, 50 = trend midline.
-                </p>
-              ) : (
-                <div className="space-y-3">
-                  {/* Live RSI value */}
-                  {liveRsi && liveRsi.value != null && (
-                    <div className="flex items-center justify-between px-3 py-2 rounded-lg"
-                      style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}>
-                      <span className="text-xs font-semibold" style={{ color: 'var(--text-muted)' }}>
-                        Live RSI({liveRsi.period})
-                      </span>
-                      <span className="text-sm font-mono font-bold" style={{
-                        color: liveRsi.value >= 70 ? 'var(--red)' : liveRsi.value <= 30 ? 'var(--green)' : 'var(--text-primary)',
-                      }}>
-                        {liveRsi.value.toFixed(2)}
-                      </span>
-                    </div>
-                  )}
-                  {liveRsi && liveRsi.warmupProgress < 1 && (
-                    <div className="flex items-center gap-2 text-xs" style={{ color: 'var(--text-muted)' }}>
-                      <div className="flex-1 h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border-subtle)' }}>
-                        <div className="h-full rounded-full transition-all duration-500"
-                          style={{ width: `${liveRsi.warmupProgress * 100}%`, background: 'var(--purple)' }} />
-                      </div>
-                      <span className="font-mono">{Math.round(liveRsi.warmupProgress * 100)}% warmed</span>
-                    </div>
-                  )}
-
-                  {/* Period + threshold inputs */}
-                  <div className="grid grid-cols-3 gap-2">
-                    <label className="flex flex-col gap-1">
-                      <span className="eyebrow" style={{ color: 'var(--text-muted)' }}>
-                        Period
-                      </span>
-                      <input
-                        type="number"
-                        min="2"
-                        max="200"
-                        value={rsiUi.period}
-                        onChange={(e) => updateRsi((prev) => ({ ...prev, period: e.target.value }))}
-                        className="input-field text-sm !py-2"
-                      />
-                    </label>
-                    <label className="flex flex-col gap-1">
-                      <span className="eyebrow" style={{ color: 'var(--text-muted)' }}>
-                        Overbought
-                      </span>
-                      <input
-                        type="number"
-                        min="51"
-                        max="100"
-                        value={rsiUi.overbought}
-                        onChange={(e) => updateRsi((prev) => ({ ...prev, overbought: e.target.value }))}
-                        className="input-field text-sm !py-2"
-                      />
-                    </label>
-                    <label className="flex flex-col gap-1">
-                      <span className="eyebrow" style={{ color: 'var(--text-muted)' }}>
-                        Oversold
-                      </span>
-                      <input
-                        type="number"
-                        min="0"
-                        max="49"
-                        value={rsiUi.oversold}
-                        onChange={(e) => updateRsi((prev) => ({ ...prev, oversold: e.target.value }))}
-                        className="input-field text-sm !py-2"
-                      />
-                    </label>
-                  </div>
-
-                  {/* Signal toggles */}
-                  <div>
-                    <div className="eyebrow mb-2" style={{ color: 'var(--text-muted)' }}>
-                      Alerts to fire
-                    </div>
-                    <div className="space-y-1.5">
-                      {RSI_SIGNAL_ORDER.map((key) => (
-                        <div key={key}>
-                          <label className="flex items-center gap-2 px-3 py-2 rounded-lg cursor-pointer"
-                            style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)' }}>
-                            <input
-                              type="checkbox"
-                              className="w-4 h-4"
-                              checked={rsiUi.signals[key]}
-                              onChange={(e) =>
-                                updateRsi((prev) => ({
-                                  ...prev,
-                                  signals: { ...prev.signals, [key]: e.target.checked },
-                                }))
-                              }
-                            />
-                            <span className="text-xs font-medium" style={{ color: 'var(--text-secondary)' }}>
-                              {RSI_SIGNAL_LABELS_LONG[key]}
-                            </span>
-                          </label>
-                          {key === 'signalLineCross' && rsiUi.signals.signalLineCross && (
-                            <label className="flex items-center gap-2 mt-1.5 ml-6 mr-3">
-                              <span className="text-[11px] font-semibold" style={{ color: 'var(--text-muted)' }}>
-                                EMA length
-                              </span>
-                              <input
-                                type="number"
-                                min="2"
-                                max="200"
-                                value={rsiUi.signalLineLength}
-                                onChange={(e) => updateRsi((prev) => ({ ...prev, signalLineLength: e.target.value }))}
-                                className="input-field text-sm !py-1.5 !px-2 w-20"
-                              />
-                            </label>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-
-                  {rsiFormError && (
-                    <div className="text-xs px-3 py-2 rounded-lg" style={{ background: 'var(--red-bg)', color: 'var(--red)' }}>
-                      {rsiFormError}
-                    </div>
-                  )}
-
-                  <p className="text-[11px] leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-                    Changes apply when you start monitoring. If a watch is already running,
-                    stop &amp; restart it to apply new RSI settings.
-                  </p>
-                </div>
-              )}
-            </div>
-          </div>{/* end lg:col-span-5 */}
-
-          {/* ─── RIGHT: Pairs + Alerts ─── */}
-          <div className="lg:col-span-7 space-y-4">
-
-            {/* Crossover Pairs */}
-            <div className="card !p-3 sm:!p-5">
-              <div className="flex items-center justify-between gap-3 mb-4 min-w-0">
-                <div className="section-label flex items-center gap-2 min-w-0">
-                  <Target className="w-4 h-4 flex-shrink-0" style={{ color: 'var(--purple)' }} />
-                  <span className="truncate">Crossover Pairs {displaySymbol && <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}>({displaySymbol})</span>}</span>
-                </div>
-                <span className="badge flex-shrink-0" style={{ background: 'rgba(167,139,250,0.12)', color: 'var(--purple)' }}>
-                  {crossoverPairs.length}
-                </span>
-              </div>
-
-              {!displaySymbol || crossoverPairs.length === 0 ? (
-                <div className="text-center py-8" style={{ color: 'var(--text-muted)' }}>
-                  <Target className="w-8 h-8 mx-auto mb-2 opacity-30" />
-                  <p className="text-sm font-medium">{!displaySymbol ? 'Select a symbol' : 'No crossover pairs yet'}</p>
-                  <p className="text-xs mt-1 opacity-60">{!displaySymbol ? 'to see EMA pairs for that stock' : 'Add at least 2 EMAs to see pairs'}</p>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {crossoverPairs.map(([fast, slow], i) => {
-                    const fastVal = displayEmaValues[fast.period];
-                    const slowVal = displayEmaValues[slow.period];
-                    const fastAbove = fastVal != null && slowVal != null ? fastVal > slowVal : null;
-                    const diff = fastVal != null && slowVal != null ? fastVal - slowVal : null;
-                    const isEditing = editingPairIndex === i;
-                    const allPeriods = [9, 21, 50, 100, 200];
-
-                    const startEdit = () => {
-                      setEditingPairIndex(i);
-                      setEditPairFast(fast.period);
-                      setEditPairSlow(slow.period);
-                    };
-                    const cancelEdit = () => setEditingPairIndex(null);
-                    const saveEdit = () => {
-                      if (!displaySymbol || editPairFast === editPairSlow) return;
-                      const [p1, p2] = editPairFast < editPairSlow ? [editPairFast, editPairSlow] : [editPairSlow, editPairFast];
-                      setEmasBySymbol((prev) => {
-                        const list = prev[displaySymbol] ?? [];
-                        const next = [...list];
-                        if (!next.some((e) => e.period === p1)) next.push({ id: Date.now(), period: p1, color: COLORS[next.length % COLORS.length] });
-                        if (!next.some((e) => e.period === p2)) next.push({ id: Date.now() + 1, period: p2, color: COLORS[next.length % COLORS.length] });
-                        return { ...prev, [displaySymbol]: next };
-                      });
-                      setEditingPairIndex(null);
-                    };
-
-                    return (
-                      <div
-                        key={i}
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => !isEditing && startEdit()}
-                        onKeyDown={(e) => !isEditing && (e.key === 'Enter' || e.key === ' ') && startEdit()}
-                        className={`p-4 rounded-xl cursor-pointer transition-all ${isEditing ? 'ring-2' : ''}`}
-                        style={{
-                          background: 'var(--bg-elevated)',
-                          border: isEditing ? '2px solid var(--accent)' : '1px solid var(--border-subtle)',
-                          boxShadow: isEditing ? '0 0 0 2px rgba(14,165,233,0.2)' : undefined,
-                        }}
-                      >
-                        {isEditing ? (
-                          <div className="space-y-3">
-                            <div className="flex items-center gap-2 text-sm font-medium" style={{ color: 'var(--text-secondary)' }}>
-                              <Pencil className="w-4 h-4" style={{ color: 'var(--accent)' }} />
-                              Edit EMA pair
-                            </div>
-                            <div className="flex flex-wrap items-center gap-3">
-                              <label className="flex items-center gap-2">
-                                <span className="text-xs" style={{ color: 'var(--text-muted)' }}>Fast:</span>
-                                <select
-                                  value={editPairFast}
-                                  onChange={(e) => setEditPairFast(Number(e.target.value))}
-                                  className="input-field !py-2 !px-3 text-sm w-24"
-                                >
-                                  {allPeriods.map((p) => (
-                                    <option key={p} value={p}>{p}</option>
-                                  ))}
-                                </select>
-                              </label>
-                              <ArrowRight className="w-4 h-4" style={{ color: 'var(--text-muted)' }} />
-                              <label className="flex items-center gap-2">
-                                <span className="text-xs" style={{ color: 'var(--text-muted)' }}>Slow:</span>
-                                <select
-                                  value={editPairSlow}
-                                  onChange={(e) => setEditPairSlow(Number(e.target.value))}
-                                  className="input-field !py-2 !px-3 text-sm w-24"
-                                >
-                                  {allPeriods.map((p) => (
-                                    <option key={p} value={p}>{p}</option>
-                                  ))}
-                                </select>
-                              </label>
-                            </div>
-                            <div className="flex gap-2">
-                              <button onClick={(e) => { e.stopPropagation(); saveEdit(); }} className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold" style={{ background: 'var(--accent)', color: '#ffffff' }}>
-                                <Check className="w-3.5 h-3.5" /> Save
-                              </button>
-                              <button onClick={(e) => { e.stopPropagation(); cancelEdit(); }} className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold" style={{ background: 'var(--bg-elevated)', border: '1px solid var(--border-medium)', color: 'var(--text-secondary)' }}>
-                                Cancel
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <>
-                            <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-                              <div className="flex items-center gap-2 flex-shrink-0">
-                                <div className="w-3 h-3 rounded-full" style={{ backgroundColor: fast.color, boxShadow: `0 0 6px ${fast.color}50` }} />
-                                <span className="text-sm font-bold" style={{ color: 'var(--text-primary)' }}>EMA({fast.period})</span>
-                              </div>
-                              <ArrowRight className="w-4 h-4 flex-shrink-0" style={{ color: 'var(--text-muted)' }} />
-                              <div className="flex items-center gap-2 flex-shrink-0">
-                                <div className="w-3 h-3 rounded-full" style={{ backgroundColor: slow.color, boxShadow: `0 0 6px ${slow.color}50` }} />
-                                <span className="text-sm font-bold" style={{ color: 'var(--text-primary)' }}>EMA({slow.period})</span>
-                              </div>
-                              <span className="text-xs sm:text-sm flex items-center gap-1 flex-shrink-0" style={{ color: 'var(--text-muted)' }}>
-                                <Pencil className="w-3.5 h-3.5" /> Edit
-                              </span>
-                              {displaySymbol && monitoredSymbols.has(displaySymbol) && fastAbove !== null && (
-                                <span className="px-2.5 py-1.5 rounded-lg text-xs font-bold flex-shrink-0 min-h-[28px] inline-flex items-center" style={{
-                                  background: fastAbove ? 'var(--green-bg)' : 'var(--red-bg)',
-                                  color: fastAbove ? 'var(--green)' : 'var(--red)',
-                                  border: `1px solid ${fastAbove ? 'rgba(22,163,74,0.2)' : 'rgba(220,38,38,0.2)'}`
-                                }}>
-                                  {fastAbove ? '▲ Bullish' : '▼ Bearish'}
-                                </span>
-                              )}
-                            </div>
-                            {displaySymbol && monitoredSymbols.has(displaySymbol) && fastVal != null && slowVal != null ? (
-                              <div className="flex items-center gap-4 mt-2.5 text-sm font-mono">
-                                <span style={{ color: 'var(--text-secondary)' }}>Fast: <span style={{ color: 'var(--text-primary)' }}>{fastVal.toFixed(2)}</span></span>
-                                <span style={{ color: 'var(--text-secondary)' }}>Slow: <span style={{ color: 'var(--text-primary)' }}>{slowVal.toFixed(2)}</span></span>
-                                <span style={{ color: diff! >= 0 ? 'var(--green)' : 'var(--red)' }}>
-                                  Δ {diff! >= 0 ? '+' : ''}{diff!.toFixed(2)}
-                                </span>
-                              </div>
-                            ) : (
-                              <p className="text-sm mt-2" style={{ color: 'var(--text-muted)' }}>
-                                {displaySymbol && monitoredSymbols.has(displaySymbol) ? 'Warming up EMA data...' : 'Start monitoring to see live values'}
-                              </p>
-                            )}
-                          </>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-
-            {/* Alert History */}
-            <div className="card !p-5">
-              <div className="flex items-center justify-between mb-4">
-                <div className="section-label">
-                  <Bell className="w-4 h-4" style={{ color: 'var(--amber)' }} />
-                  Alerts
-                </div>
-                <span className="badge" style={{ background: 'rgba(251,191,36,0.12)', color: 'var(--amber)' }}>
-                  {combinedAlerts.length}
-                </span>
-              </div>
-
-              <div className="space-y-1.5 max-h-[420px] overflow-y-auto pr-1">
-                {combinedAlerts.length === 0 ? (
-                  <div className="text-center py-8" style={{ color: 'var(--text-muted)' }}>
-                    <Bell className="w-8 h-8 mx-auto mb-2 opacity-25" />
-                    <p className="text-sm font-semibold" style={{ color: 'var(--text-secondary)' }}>No alerts yet</p>
-                    <p className="text-xs mt-1 opacity-70 max-w-[220px] mx-auto leading-relaxed">
-                      EMA crossovers and RSI signals appear here as they happen
-                    </p>
-                  </div>
-                ) : (
-                  combinedAlerts.map((item) => {
-                    const time = new Date(item.data.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                    if (item.kind === 'crossover') {
-                      const a = item.data;
-                      const isBull = a.crossoverType === 'bullish';
-                      return (
-                        <div key={a.id} className={`alert-row ${isBull ? 'dir-bull' : 'dir-bear'}`}>
-                          <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                            <div className="alert-icon" style={{ background: isBull ? 'var(--green-bg)' : 'var(--red-bg)' }}>
-                              {isBull ? (
-                                <TrendingUp className="w-4 h-4" style={{ color: 'var(--green)' }} />
-                              ) : (
-                                <TrendingDown className="w-4 h-4" style={{ color: 'var(--red)' }} />
-                              )}
-                            </div>
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-baseline gap-2 min-w-0">
-                                <span className="alert-symbol truncate">{a.symbol}</span>
-                                <span className="alert-kind flex-shrink-0">EMA</span>
-                              </div>
-                              <div className="alert-detail truncate">
-                                EMA({a.fastPeriod}) {isBull ? '↑' : '↓'} EMA({a.slowPeriod}) · {time} · {a.timeframe}
-                              </div>
-                            </div>
-                          </div>
-                          <div className="alert-price flex-shrink-0">{getCurrencySymbol(a.currency)}{a.price}</div>
-                        </div>
-                      );
-                    }
-                    const a = item.data;
-                    const label = RSI_SIGNAL_LABELS[a.signalType];
-                    const isBull = a.direction === 'bullish';
-                    return (
-                      <div key={a.id} className={`alert-row ${isBull ? 'dir-bull' : 'dir-bear'}`}>
-                        <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                          <div className="alert-icon" style={{ background: 'rgba(124, 58, 237, 0.12)' }}>
-                            <Activity className="w-4 h-4" style={{ color: 'var(--purple)' }} />
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-baseline gap-2 min-w-0">
-                              <span className="alert-symbol truncate">{a.symbol}</span>
-                              <span className="alert-kind flex-shrink-0">RSI</span>
-                            </div>
-                            <div className="alert-detail truncate">
-                              {label} · RSI({a.period}) {a.rsiValue} · {time} · {a.timeframe}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="alert-price flex-shrink-0">{getCurrencySymbol(a.currency)}{a.price}</div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </div>
-          </div>
+                {added ? <span className="result-added"><Check size={14} strokeWidth={2.6} /> Added</span> : <span className="result-add"><Plus size={16} strokeWidth={2.6} /></span>}
+              </button>
+            );
+          })}
         </div>
       </div>
     </div>
