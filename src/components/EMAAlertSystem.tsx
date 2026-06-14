@@ -15,16 +15,18 @@ import { io, Socket } from 'socket.io-client';
 import {
   Moon, Sun, Bell, X, Plus, Check, ChevronRight, Power, Zap, Layers, Activity,
   TrendingUp, TrendingDown, Search, Mail, Download, Sparkles, RefreshCw, Settings, Trash2,
+  Send,
 } from 'lucide-react';
 import {
   Spotlight, WatchRow, BottomNav, RsiMeter, LivePill, DirTag, optionMeta, TodayAlerts,
   type TodayAlertItem,
 } from './signalstack-ui';
+import type { DaySummary } from '@/lib/daySummary';
 
 /* ---------- Types ---------- */
 interface RsiSignalFlags { overboughtCross: boolean; oversoldCross: boolean; thresholdBreach: boolean; centerlineCross: boolean; signalLineCross: boolean; }
-interface RsiPayload { enabled: boolean; period: number; overbought: number; oversold: number; signalLineLength?: number; signals: RsiSignalFlags; }
-interface RsiUiConfig { enabled: boolean; period: string; overbought: string; oversold: string; signalLineLength: string; signals: RsiSignalFlags; }
+interface RsiPayload { enabled: boolean; period: number; overbought: number; oversold: number; signalLineLength?: number; timeframe?: string; signals: RsiSignalFlags; }
+interface RsiUiConfig { enabled: boolean; period: string; overbought: string; oversold: string; signalLineLength: string; timeframe: string; signals: RsiSignalFlags; }
 interface RsiLive { value: number | null; period: number; warmupProgress: number; }
 interface MonitoredWatch { symbol: string; timeframe: string; emaPeriods: number[]; trackBullish: boolean; trackBearish: boolean; exchange: string; currency: string; rsi?: RsiPayload; }
 interface EMA { id: number; period: number; color: string; }
@@ -35,7 +37,7 @@ interface SearchResult { symbol: string; name: string; exchange: string; currenc
 
 const RSI_DEFAULTS = { period: '14', overbought: '70', oversold: '30', signalLineLength: '14' };
 const DEFAULT_RSI_SIGNALS: RsiSignalFlags = { overboughtCross: false, oversoldCross: false, thresholdBreach: false, centerlineCross: false, signalLineCross: true };
-const EMPTY_RSI_UI: RsiUiConfig = { enabled: false, ...RSI_DEFAULTS, signals: { overboughtCross: false, oversoldCross: false, thresholdBreach: false, centerlineCross: false, signalLineCross: false } };
+const EMPTY_RSI_UI: RsiUiConfig = { enabled: false, ...RSI_DEFAULTS, timeframe: '', signals: { overboughtCross: false, oversoldCross: false, thresholdBreach: false, centerlineCross: false, signalLineCross: false } };
 const RSI_SIGNAL_LABELS_LONG: Record<keyof RsiSignalFlags, string> = {
   overboughtCross: 'Overbought cross (bearish)', oversoldCross: 'Oversold cross (bullish)',
   thresholdBreach: 'Threshold breach', centerlineCross: 'Centerline (50) cross', signalLineCross: 'Signal line cross',
@@ -46,7 +48,7 @@ const RSI_SIGNAL_LABELS: Record<keyof RsiSignalFlags, string> = {
 };
 const RSI_SIGNAL_ORDER: Array<keyof RsiSignalFlags> = ['signalLineCross', 'overboughtCross', 'oversoldCross', 'centerlineCross'];
 
-function buildRsiPayload(ui: RsiUiConfig): { ok: true; rsi?: RsiPayload } | { ok: false; error: string } {
+function buildRsiPayload(ui: RsiUiConfig, emaTimeframe?: string): { ok: true; rsi?: RsiPayload } | { ok: false; error: string } {
   if (!ui.enabled) return { ok: true };
   const period = parseInt(ui.period.trim() || RSI_DEFAULTS.period, 10);
   const overbought = parseFloat(ui.overbought.trim() || RSI_DEFAULTS.overbought);
@@ -61,12 +63,16 @@ function buildRsiPayload(ui: RsiUiConfig): { ok: true; rsi?: RsiPayload } | { ok
     if (!Number.isFinite(sigLen) || sigLen < 2 || sigLen > 200) return { ok: false, error: 'Signal line EMA length must be 2–200' };
     payload.signalLineLength = sigLen;
   }
+  if (ui.timeframe && ui.timeframe !== emaTimeframe) {
+    payload.timeframe = ui.timeframe;
+  }
   return { ok: true, rsi: payload };
 }
 function rsiPayloadToUi(p: RsiPayload | undefined): RsiUiConfig {
   if (!p || !p.enabled) return EMPTY_RSI_UI;
   return { enabled: true, period: String(p.period), overbought: String(p.overbought), oversold: String(p.oversold),
-    signalLineLength: p.signalLineLength != null ? String(p.signalLineLength) : RSI_DEFAULTS.signalLineLength, signals: { ...p.signals } };
+    signalLineLength: p.signalLineLength != null ? String(p.signalLineLength) : RSI_DEFAULTS.signalLineLength,
+    timeframe: p.timeframe || '', signals: { ...p.signals } };
 }
 function watchKey(symbol: string, timeframe: string) { return `${symbol.toUpperCase()}:${timeframe}`; }
 
@@ -154,6 +160,12 @@ export default function EMAAlertSystem() {
   const [testPushMessage, setTestPushMessage] = useState<string | null>(null);
   const [cleanupStatus, setCleanupStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle');
   const [cleanupMessage, setCleanupMessage] = useState<string | null>(null);
+  const [daySummaryBySymbol, setDaySummaryBySymbol] = useState<Record<string, DaySummary>>({});
+  const [telegramChatId, setTelegramChatId] = useState('');
+  const [telegramConfigured, setTelegramConfigured] = useState<boolean>(false);
+  const [telegramConnectUrl, setTelegramConnectUrl] = useState<string | null>(null);
+  const [telegramStatus, setTelegramStatus] = useState<'idle' | 'saving' | 'success' | 'error' | 'sending'>('idle');
+  const [telegramMessage, setTelegramMessage] = useState<string | null>(null);
 
   const hasRestoredRef = useRef(false);
   const hasRestoredMonitoredRef = useRef(false);
@@ -221,6 +233,38 @@ export default function EMAAlertSystem() {
     if (!mounted) return;
     axios.get<{ vapidConfigured?: boolean }>('/api/status').then((r) => setPushAvailable(!!r.data?.vapidConfigured)).catch(() => setPushAvailable(false));
   }, [mounted]);
+
+  /* telegram: load saved chat id + server-configured flag when tools open */
+  useEffect(() => {
+    if (!mounted || !userId || !showTools) return;
+    axios.get<{ success: boolean; configured?: boolean; chatId?: string; connectUrl?: string | null }>('/api/user/telegram')
+      .then((r) => {
+        if (!r.data.success) return;
+        setTelegramConfigured(!!r.data.configured);
+        setTelegramChatId(r.data.chatId || '');
+        setTelegramConnectUrl(r.data.connectUrl || null);
+      })
+      .catch(() => { /* ignore */ });
+  }, [mounted, userId, showTools]);
+
+  /* telegram: while the tools drawer is open and not yet connected, poll for the
+     chat id the webhook saves once the user taps "Connect Telegram" → Start */
+  useEffect(() => {
+    if (!mounted || !userId || !showTools || telegramChatId || !telegramConnectUrl) return;
+    const interval = setInterval(() => {
+      axios.get<{ success: boolean; chatId?: string }>('/api/user/telegram')
+        .then((r) => {
+          if (r.data.success && r.data.chatId) {
+            setTelegramChatId(r.data.chatId);
+            setTelegramStatus('success');
+            setTelegramMessage('Connected via Telegram!');
+            setTimeout(() => { setTelegramStatus('idle'); setTelegramMessage(null); }, 5000);
+          }
+        })
+        .catch(() => { /* ignore */ });
+    }, 4000);
+    return () => clearInterval(interval);
+  }, [mounted, userId, showTools, telegramChatId, telegramConnectUrl]);
   useEffect(() => {
     if (!mounted || !('serviceWorker' in navigator) || !('PushManager' in window)) return;
     navigator.serviceWorker.ready.then((reg) => reg.pushManager.getSubscription()).then((s) => s != null && setPushEnabled(true)).catch(() => { });
@@ -468,6 +512,25 @@ export default function EMAAlertSystem() {
     } catch { /* ignore */ } void skipLoading;
   }, [getExchange, setFlash]);
 
+  /* ---------- Day summary (today/yesterday OHLC) for the Spotlight ---------- */
+  const fetchDaySummary = useCallback(async (sym: string, exchange?: string) => {
+    if (!sym) return;
+    const exch = exchange ?? getExchange(sym);
+    try {
+      const res = await axios.post('/api/day-summary', { symbol: sym, exchange: exch });
+      if (res.data.success && res.data.data) {
+        setDaySummaryBySymbol((prev) => ({ ...prev, [sym]: res.data.data }));
+      }
+    } catch { /* ignore */ }
+  }, [getExchange]);
+
+  useEffect(() => {
+    if (!mounted || !displaySymbol) return;
+    fetchDaySummary(displaySymbol);
+    const interval = setInterval(() => fetchDaySummary(displaySymbol), 60000);
+    return () => clearInterval(interval);
+  }, [mounted, displaySymbol, fetchDaySummary]);
+
   const timeframeFetchKey = useMemo(() => symbols.map((s) => `${s.symbol}:${timeframeBySymbol[s.symbol] ?? DEFAULT_TIMEFRAME}`).sort().join(','), [symbols, timeframeBySymbol]);
   const symbolsRef = useRef<MonitoredSymbol[]>(symbols); symbolsRef.current = symbols;
   const tfRef = useRef<Record<string, string>>(timeframeBySymbol); tfRef.current = timeframeBySymbol;
@@ -529,13 +592,13 @@ export default function EMAAlertSystem() {
     const symbolEmas = emasBySymbol[sym] ?? [];
     const emaOn = emaEnabledBySymbol[sym] ?? true;
     const symRsiUi = rsiBySymbol[sym] ?? EMPTY_RSI_UI;
-    const rsiCheck = buildRsiPayload(symRsiUi);
+    const tf = getTimeframe(sym);
+    const rsiCheck = buildRsiPayload(symRsiUi, tf);
     const rsiOn = symRsiUi.enabled && rsiCheck.ok && !!rsiCheck.rsi;
     if (!emaOn && !rsiOn) { setMonitorStatus(`${sym}: enable EMA alerts, RSI alerts, or both.`); return; }
     if (emaOn && symbolEmas.length < 2) { setMonitorStatus(`${sym}: add at least 2 EMAs for crossover alerts.`); return; }
     if (!rsiCheck.ok) { setRsiFormError(rsiCheck.error); setMonitorStatus(`${sym}: ${rsiCheck.error}`); return; }
     const s = symbols.find((x) => x.symbol === sym); if (!s) return;
-    const tf = getTimeframe(sym);
     try {
       setMonitoringBusy(true);
       setMonitorStatus(`Starting ${sym} — loading history and warming indicators (20–30s).`);
@@ -584,6 +647,33 @@ export default function EMAAlertSystem() {
     try { const res = await axios.post<{ success: boolean; message?: string; error?: string; sent?: number; scheduled?: boolean }>('/api/push-test', delaySeconds > 0 ? { delaySeconds } : {}); if (res.data.success) { setTestPushStatus('success'); setTestPushMessage(res.data.message ?? (res.data.sent != null ? `Sent to ${res.data.sent} device(s).` : 'Check your browser/tray.')); } else { setTestPushStatus('error'); setTestPushMessage((res.data.error ?? 'Send failed')); } }
     catch { setTestPushStatus('error'); setTestPushMessage('Network or server error.'); }
     setTimeout(() => { setTestPushStatus('idle'); setTestPushMessage(null); }, 6000);
+  };
+  const saveTelegramChatId = async () => {
+    setTelegramStatus('saving'); setTelegramMessage(null);
+    try {
+      const res = await axios.put<{ success: boolean; error?: string }>('/api/user/telegram', { chatId: telegramChatId.trim() });
+      if (res.data.success) { setTelegramStatus('success'); setTelegramMessage(telegramChatId.trim() ? 'Saved.' : 'Cleared.'); }
+      else { setTelegramStatus('error'); setTelegramMessage(res.data.error || 'Save failed'); }
+    } catch (e: any) { setTelegramStatus('error'); setTelegramMessage(e?.response?.data?.error || 'Save failed'); }
+    setTimeout(() => { setTelegramStatus('idle'); setTelegramMessage(null); }, 5000);
+  };
+  const sendTelegramTest = async () => {
+    setTelegramStatus('sending'); setTelegramMessage(null);
+    try {
+      const res = await axios.post<{ success: boolean; error?: string; message?: string }>('/api/user/telegram');
+      if (res.data.success) { setTelegramStatus('success'); setTelegramMessage(res.data.message || 'Sent — check Telegram.'); }
+      else { setTelegramStatus('error'); setTelegramMessage(res.data.error || 'Send failed'); }
+    } catch (e: any) { setTelegramStatus('error'); setTelegramMessage(e?.response?.data?.error || 'Send failed'); }
+    setTimeout(() => { setTelegramStatus('idle'); setTelegramMessage(null); }, 6000);
+  };
+  const disconnectTelegram = async () => {
+    setTelegramStatus('saving'); setTelegramMessage(null);
+    try {
+      const res = await axios.put<{ success: boolean; error?: string }>('/api/user/telegram', { chatId: '' });
+      if (res.data.success) { setTelegramChatId(''); setTelegramStatus('success'); setTelegramMessage('Disconnected.'); }
+      else { setTelegramStatus('error'); setTelegramMessage(res.data.error || 'Failed'); }
+    } catch (e: any) { setTelegramStatus('error'); setTelegramMessage(e?.response?.data?.error || 'Failed'); }
+    setTimeout(() => { setTelegramStatus('idle'); setTelegramMessage(null); }, 5000);
   };
   const runCleanup = async () => {
     if (cleanupStatus === 'running') return;
@@ -742,6 +832,65 @@ export default function EMAAlertSystem() {
                 {cleanupMessage && <div>Cleanup: {cleanupMessage}</div>}
               </div>
             )}
+            <div className="tg-row">
+              <div className="tg-label">
+                <Send size={14} strokeWidth={2.2} />
+                <span>Telegram alerts</span>
+                {!telegramConfigured && <span className="tg-warn">bot not configured on server</span>}
+              </div>
+
+              {telegramChatId ? (
+                <div className="tg-connect-row">
+                  <span className="tg-connected-badge">✅ Connected</span>
+                  <button type="button" className="tool-tile" onClick={sendTelegramTest} disabled={telegramStatus === 'sending' || !telegramConfigured}>
+                    <Send size={14} /><span>{telegramStatus === 'sending' ? 'Sending…' : 'Test'}</span>
+                  </button>
+                  <button type="button" className="tool-tile" onClick={disconnectTelegram} disabled={telegramStatus === 'saving'}>
+                    <X size={14} /><span>{telegramStatus === 'saving' ? 'Removing…' : 'Disconnect'}</span>
+                  </button>
+                </div>
+              ) : telegramConnectUrl ? (
+                <>
+                  <div className="tg-connect-row">
+                    <a className="tool-tile tg-connect-btn" href={telegramConnectUrl} target="_blank" rel="noreferrer noopener">
+                      <Send size={14} /><span>Connect Telegram</span>
+                    </a>
+                  </div>
+                  <div className="tg-hint">
+                    Tap <b>Connect Telegram</b>, then press <b>Start</b> in the chat that opens —
+                    we link it to your account automatically, no chat id to find.
+                  </div>
+                </>
+              ) : (
+                <div className="tg-hint">
+                  {telegramConfigured
+                    ? 'Bot username unavailable right now — reopen this panel in a moment.'
+                    : <>Server admin: set <code>TELEGRAM_BOT_TOKEN</code> to enable Telegram alerts.</>}
+                </div>
+              )}
+
+              <details className="tg-advanced">
+                <summary>Advanced: enter chat id manually</summary>
+                <div className="tg-input-row">
+                  <input
+                    className="tg-input"
+                    inputMode="numeric"
+                    placeholder="Your Telegram chat id (e.g. 123456789)"
+                    value={telegramChatId}
+                    onChange={(e) => setTelegramChatId(e.target.value.replace(/[^\d-]/g, ''))}
+                  />
+                  <button type="button" className="tool-tile" onClick={saveTelegramChatId} disabled={telegramStatus === 'saving'}>
+                    <Check size={14} /><span>{telegramStatus === 'saving' ? 'Saving…' : 'Save'}</span>
+                  </button>
+                </div>
+                <div className="tg-hint">
+                  Open <code>@BotFather</code> → create or pick a bot, DM it, send <code>/start</code> —
+                  the bot replies with what to do next.
+                </div>
+              </details>
+
+              {telegramMessage && <div className="tools-msg">Telegram: {telegramMessage}</div>}
+            </div>
           </div>
         )}
 
@@ -762,9 +911,8 @@ export default function EMAAlertSystem() {
                   changePercent={displayPrice?.changePercent ?? 0}
                   flash={flashByKey[displayKey] ?? ''}
                   priceError={displayPrice ? undefined : displayPriceError}
-                  timeframe={displayTimeframe}
-                  timeframes={TIMEFRAMES}
-                  onTimeframe={(tf) => changeTimeframe(displaySymbol, tf)}
+                  emaTimeframe={displayTimeframe}
+                  rsiTimeframe={rsiUi.timeframe || undefined}
                   fastPeriod={spotFastP}
                   slowPeriod={spotSlowP}
                   fastVal={spotFastVal}
@@ -772,6 +920,7 @@ export default function EMAAlertSystem() {
                   rsi={liveRsi?.value ?? null}
                   rsiPeriod={liveRsi?.period ?? parseInt(rsiUi.period || '14', 10)}
                   connected={connected}
+                  daySummary={daySummaryBySymbol[displaySymbol] ?? null}
                 />
               )}
 
@@ -840,6 +989,8 @@ export default function EMAAlertSystem() {
           /* ---------- Config tab ---------- */
           <ConfigScreen
             symbol={displaySymbol}
+            emaTimeframe={displayTimeframe}
+            onEmaTimeframe={(tf) => displaySymbol && changeTimeframe(displaySymbol, tf)}
             emas={emas}
             emaAlertsEnabled={emaAlertsEnabled}
             onToggleEma={updateEmaEnabled}
@@ -922,6 +1073,8 @@ function Toggle({ on, disabled, onChange }: { on: boolean; disabled?: boolean; o
 
 interface ConfigProps {
   symbol: string | null;
+  emaTimeframe: string;
+  onEmaTimeframe: (tf: string) => void;
   emas: EMA[]; emaAlertsEnabled: boolean; onToggleEma: (v: boolean) => void;
   onAddEma: (p?: number) => void; onRemoveEma: (id: number) => void;
   newEmaPeriod: string; setNewEmaPeriod: (v: string) => void;
@@ -951,6 +1104,19 @@ function ConfigScreen(p: ConfigProps) {
       <div className="cfg-card">
         <div className="cfg-card-head"><span className="cfg-title"><Layers size={16} strokeWidth={2.2} /> EMA crossover</span><Toggle on={p.emaAlertsEnabled} onChange={p.onToggleEma} /></div>
         <div className={`cfg-body ${p.emaAlertsEnabled ? '' : 'dim'}`}>
+          <span className="cfg-label">EMA timeframe</span>
+          <div className="spot-tf" style={{ marginBottom: 12 }}>
+            {TIMEFRAMES.map((tf) => (
+              <button
+                key={tf}
+                type="button"
+                className={`tf ${p.emaTimeframe === tf ? 'active' : ''}`}
+                onClick={() => p.onEmaTimeframe(tf)}
+              >
+                {tf}
+              </button>
+            ))}
+          </div>
           <span className="cfg-label">Active periods</span>
           <div className="ema-pills">
             {[...p.emas].sort((a, b) => a.period - b.period).map((e) => (
@@ -990,6 +1156,19 @@ function ConfigScreen(p: ConfigProps) {
           <Toggle on={p.rsiUi.enabled} onChange={(v) => p.updateRsi((prev) => ({ ...prev, enabled: v, ...(v ? { signals: { ...DEFAULT_RSI_SIGNALS } } : {}) }))} />
         </div>
         <div className={`cfg-body ${p.rsiUi.enabled ? '' : 'dim'}`}>
+          <span className="cfg-label">RSI timeframe</span>
+          <div className="spot-tf" style={{ marginBottom: 12 }}>
+            {TIMEFRAMES.map((tf) => {
+              const active = (p.rsiUi.timeframe || p.emaTimeframe) === tf;
+              const isDefault = !p.rsiUi.timeframe && tf === p.emaTimeframe;
+              return (
+                <button key={tf} type="button" className={`tf ${active ? 'active' : ''}`}
+                  onClick={() => p.updateRsi((prev) => ({ ...prev, timeframe: tf === p.emaTimeframe ? '' : tf }))}>
+                  {tf}{isDefault ? '*' : ''}
+                </button>
+              );
+            })}
+          </div>
           <div className="rsi-fields">
             <label className="rsi-field"><span>Period</span><input inputMode="numeric" value={p.rsiUi.period} onChange={(e) => p.updateRsi((prev) => ({ ...prev, period: e.target.value.replace(/\D/g, '') }))} /></label>
             <label className="rsi-field"><span>Overbought</span><input inputMode="numeric" value={p.rsiUi.overbought} onChange={(e) => p.updateRsi((prev) => ({ ...prev, overbought: e.target.value.replace(/\D/g, '') }))} /></label>

@@ -45,6 +45,8 @@ function parseRsi(raw: unknown): RsiConfig | undefined {
   } else if (s.signalLineCross) {
     cfg.signalLineLength = 14;
   }
+  const tf = (r as { timeframe?: string }).timeframe;
+  if (typeof tf === 'string' && tf.trim()) cfg.timeframe = tf.trim();
   return cfg;
 }
 

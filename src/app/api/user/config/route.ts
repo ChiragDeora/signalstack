@@ -139,18 +139,16 @@ export async function PUT(req: NextRequest) {
     }
     let name: string | null = null;
     let email: string | null = null;
-    let phone: string | null = null;
     try {
       const user = await currentUser();
       if (user) {
         name = [user.firstName, user.lastName].filter(Boolean).join(' ').trim() || null;
-        const u = user as { primaryEmailAddress?: { emailAddress?: string }; emailAddresses?: { emailAddress?: string }[]; primaryPhoneNumber?: { phoneNumber?: string } };
+        const u = user as { primaryEmailAddress?: { emailAddress?: string }; emailAddresses?: { emailAddress?: string }[] };
         email = u.primaryEmailAddress?.emailAddress ?? u.emailAddresses?.[0]?.emailAddress ?? null;
-        phone = u.primaryPhoneNumber?.phoneNumber ?? null;
       }
-      console.log('[user/config] Clerk name/email/phone:', { name, email, phone });
+      console.log('[user/config] Clerk name/email:', { name, email });
     } catch (e) {
-      console.warn('[user/config] currentUser() failed, saving without name/email/phone:', (e as Error).message);
+      console.warn('[user/config] currentUser() failed, saving without name/email:', (e as Error).message);
     }
 
     const body = (await req.json()) as UserConfigPayload;
@@ -163,7 +161,6 @@ export async function PUT(req: NextRequest) {
       user_id: userId,
       name: name ?? null,
       email: email ?? null,
-      phone: phone ?? null,
       symbols: body.symbols ?? [],
       timeframe_by_symbol: body.timeframeBySymbol ?? {},
       emas_by_symbol: body.emasBySymbol ?? {},

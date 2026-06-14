@@ -33,6 +33,13 @@ interface SymbolState {
   isWarmedUp: boolean;
   /** Timestamp (ms) of the last candle whose close was fed into the EMAs */
   lastProcessedCandleTs: number;
+  /**
+   * When RSI has its own timeframe (config.rsi.timeframe ≠ config.timeframe),
+   * RSI processes a separate candle stream — track its own watermark.
+   * When RSI uses the same timeframe as EMA, this stays 0 and lastProcessedCandleTs
+   * is the single source of truth.
+   */
+  lastProcessedRsiCandleTs: number;
 }
 
 /** Combined alert payload from processing new candles. */
@@ -104,6 +111,7 @@ export class EMAEngine {
       lastPrice: null,
       isWarmedUp: false,
       lastProcessedCandleTs: 0,
+      lastProcessedRsiCandleTs: 0,
     });
 
     const rsiTag = rsi ? ` + RSI(${config.rsi!.period}, ob=${config.rsi!.overbought}, os=${config.rsi!.oversold})` : '';
@@ -169,8 +177,10 @@ export class EMAEngine {
       }
     }
 
-    // Feed warmup closes into RSI (if enabled) and seed its zone + signal-line state
-    if (state.rsi && state.rsiDetector) {
+    // Feed warmup closes into RSI (if enabled) and seed its zone + signal-line state.
+    // Skip when RSI uses its own timeframe — warmUpRsi() handles that case separately.
+    const rsiUsesSameTf = !state.config.rsi?.timeframe || state.config.rsi.timeframe === state.config.timeframe;
+    if (state.rsi && state.rsiDetector && rsiUsesSameTf) {
       // Compute the RSI series for warmup so the signal-line EMA can also be seeded
       const rsiSeries: number[] = [];
       const tmp = new RSICalculator(state.rsi.getPeriod());
@@ -343,8 +353,10 @@ export class EMAEngine {
           calc.bulkLoad(historyCloses);
         }
 
-        // Seed RSI silently too (including the signal-line EMA from RSI series)
-        if (state.rsi && state.rsiDetector) {
+        // Seed RSI silently too (including the signal-line EMA from RSI series).
+        // Skip when RSI uses its own timeframe — handled by separate late-warmup path.
+        const sameTf = !state.config.rsi?.timeframe || state.config.rsi.timeframe === state.config.timeframe;
+        if (state.rsi && state.rsiDetector && sameTf) {
           const rsiSeries: number[] = [];
           const tmp = new RSICalculator(state.rsi.getPeriod());
           for (const close of historyCloses) {
@@ -396,8 +408,10 @@ export class EMAEngine {
         calc.update(candle.close);
       }
 
-      // Update RSI and check for signals
-      if (state.rsi && state.rsiDetector && state.config.rsi) {
+      // Update RSI and check for signals — only when RSI shares this main timeframe.
+      // When rsi.timeframe differs, RSI is handled by processNewRsiCandles().
+      const rsiOnThisStream = !state.config.rsi?.timeframe || state.config.rsi.timeframe === state.config.timeframe;
+      if (state.rsi && state.rsiDetector && state.config.rsi && rsiOnThisStream) {
         const rsiVal = state.rsi.update(candle.close);
         if (rsiVal !== null && state.rsi.isReady()) {
           const signals = state.rsiDetector.check(rsiVal, candle.close, symbol, candleIso);
@@ -466,6 +480,159 @@ export class EMAEngine {
     // Update lastPrice with live LTP for display — but do NOT feed it into EMAs
     state.lastPrice = currentPrice;
     return { crossovers: alerts, rsi: rsiAlerts };
+  }
+
+  /**
+   * Warm up RSI from candles fetched on the RSI-specific timeframe.
+   * Only used when config.rsi.timeframe differs from config.timeframe.
+   */
+  warmUpRsi(symbol: string, emaTimeframe: string, rsiCandles: CandleData[], userId?: string): void {
+    const key = this.makeKey(symbol, emaTimeframe, userId);
+    const state = this.symbols.get(key);
+    if (!state || !state.rsi || !state.rsiDetector || !state.config.rsi) return;
+
+    const rsiTf = state.config.rsi.timeframe;
+    if (!rsiTf || rsiTf === emaTimeframe) return;
+
+    const intervalMs = timeframeToMs(rsiTf);
+    const now = Date.now();
+    const sorted = [...rsiCandles].sort((a, b) => a.timestamp - b.timestamp);
+    const closedCandles = sorted.filter((c) => c.timestamp + intervalMs <= now && c.close > 0);
+
+    if (closedCandles.length === 0) {
+      console.warn(`⚠️  EMA Engine: no closed RSI candles for warmup of ${symbol} (RSI tf=${rsiTf})`);
+      return;
+    }
+
+    const closePrices = closedCandles.map((c) => c.close);
+    const rsiSeries: number[] = [];
+    const tmp = new RSICalculator(state.rsi.getPeriod());
+    for (const close of closePrices) {
+      const v = tmp.update(close);
+      if (v !== null) rsiSeries.push(v);
+    }
+    state.rsi.bulkLoad(closePrices);
+    const rsiVal = state.rsi.getValue();
+    if (rsiVal !== null) state.rsiDetector.initFromValue(rsiVal);
+    state.rsiDetector.warmupSignalLine(rsiSeries);
+
+    state.lastProcessedRsiCandleTs = closedCandles[closedCandles.length - 1].timestamp;
+
+    console.log(
+      `📊 EMA Engine: RSI warmup complete for ${symbol} (RSI tf=${rsiTf}) — ${closePrices.length} closed candles, ready: ${state.rsi.isReady()}`,
+    );
+  }
+
+  /**
+   * Process newly-closed candles for RSI when it uses a separate timeframe.
+   * Only produces RSI alerts — EMA crossovers are handled by processNewCandles.
+   */
+  processNewRsiCandles(
+    symbol: string,
+    emaTimeframe: string,
+    rsiCandles: CandleData[],
+    currentPrice: number,
+    currency: string,
+    source: string = 'rsi-candle-close',
+    userId?: string,
+  ): RsiAlert[] {
+    const key = this.makeKey(symbol, emaTimeframe, userId);
+    const state = this.symbols.get(key);
+    if (!state || !state.rsi || !state.rsiDetector || !state.config.rsi) return [];
+
+    const rsiTf = state.config.rsi.timeframe;
+    if (!rsiTf || rsiTf === emaTimeframe) return [];
+
+    const intervalMs = timeframeToMs(rsiTf);
+    const now = Date.now();
+
+    const sorted = [...rsiCandles].sort((a, b) => a.timestamp - b.timestamp);
+    const newClosedCandles = sorted.filter(
+      (c) =>
+        c.timestamp > state.lastProcessedRsiCandleTs &&
+        c.timestamp + intervalMs <= now &&
+        c.close > 0,
+    );
+
+    if (newClosedCandles.length === 0) return [];
+
+    // Late warmup path for RSI (similar to processNewCandles)
+    const liveCutoffMs = now - 2 * intervalMs;
+    const isFirstBatch = state.lastProcessedRsiCandleTs === 0 && newClosedCandles.length > 1;
+
+    if (isFirstBatch) {
+      const historyCandles = newClosedCandles.filter((c) => c.timestamp < liveCutoffMs);
+      const liveCandles = newClosedCandles.filter((c) => c.timestamp >= liveCutoffMs);
+
+      if (historyCandles.length > 0) {
+        console.log(
+          `📊 EMA Engine: late RSI warmup for ${symbol} (RSI tf=${rsiTf}) — silently feeding ${historyCandles.length} historical candle(s)`,
+        );
+        const historyCloses = historyCandles.map((c) => c.close);
+        const rsiSeries: number[] = [];
+        const tmp = new RSICalculator(state.rsi.getPeriod());
+        for (const close of historyCloses) {
+          const v = tmp.update(close);
+          if (v !== null) rsiSeries.push(v);
+        }
+        state.rsi.bulkLoad(historyCloses);
+        const rsiVal = state.rsi.getValue();
+        if (rsiVal !== null) state.rsiDetector.initFromValue(rsiVal);
+        state.rsiDetector.warmupSignalLine(rsiSeries);
+        state.lastProcessedRsiCandleTs = historyCandles[historyCandles.length - 1].timestamp;
+      }
+
+      if (liveCandles.length === 0) {
+        state.lastPrice = currentPrice;
+        return [];
+      }
+
+      newClosedCandles.length = 0;
+      newClosedCandles.push(...liveCandles);
+    }
+
+    console.log(
+      `📊 EMA Engine: processing ${newClosedCandles.length} new RSI candle(s) for ${symbol} (RSI tf=${rsiTf})`,
+    );
+
+    const rsiAlerts: RsiAlert[] = [];
+    for (const candle of newClosedCandles) {
+      const candleIso = new Date(candle.timestamp).toISOString();
+      const rsiVal = state.rsi.update(candle.close);
+      if (rsiVal !== null && state.rsi.isReady()) {
+        const signals = state.rsiDetector.check(rsiVal, candle.close, symbol, candleIso);
+        for (const sig of signals) {
+          const rsiAlert: RsiAlert = {
+            id: randomUUID(),
+            type: 'rsi',
+            symbol,
+            timeframe: rsiTf,
+            signalType: sig.signalType,
+            direction: sig.direction,
+            rsiValue: parseFloat(sig.rsiValue.toFixed(2)),
+            previousRsi: parseFloat(sig.previousRsi.toFixed(2)),
+            period: state.config.rsi!.period,
+            overbought: state.config.rsi!.overbought,
+            oversold: state.config.rsi!.oversold,
+            price: parseFloat(candle.close.toFixed(2)),
+            currency,
+            timestamp: candleIso,
+            source,
+          };
+          if (sig.signalType === 'signalLineCross' && state.config.rsi!.signalLineLength) {
+            rsiAlert.signalLineLength = state.config.rsi!.signalLineLength;
+          }
+          rsiAlerts.push(rsiAlert);
+          console.log(
+            `🚨 RSI ${sig.signalType} (${sig.direction.toUpperCase()}) on ${symbol} [RSI tf=${rsiTf}] — RSI=${rsiAlert.rsiValue} (prev ${rsiAlert.previousRsi}) at ₹${rsiAlert.price}`,
+          );
+        }
+      }
+      state.lastProcessedRsiCandleTs = candle.timestamp;
+    }
+
+    state.lastPrice = currentPrice;
+    return rsiAlerts;
   }
 
   /**

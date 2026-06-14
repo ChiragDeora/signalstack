@@ -245,6 +245,76 @@ export async function sendCrossoverAlertEmail(
   if (!result.ok) console.warn('Brevo crossover alert email failed:', result.error);
 }
 
+export interface DaySummaryItem {
+  symbol: string;
+  currency: string;
+  todayOpen: number;
+  todayHigh: number;
+  todayLow: number;
+  todayClose: number;
+  yesterdayHigh: number | null;
+  yesterdayLow: number | null;
+}
+
+export async function sendEndOfDaySummaryEmail(
+  to: string,
+  items: DaySummaryItem[],
+  date: string,
+): Promise<{ ok: boolean; error?: string }> {
+  if (!isBrevoConfigured() || items.length === 0) return { ok: false, error: 'Not configured or no items' };
+
+  const cur = (c: string) => ({ USD: '$', INR: '₹', GBP: '£', JPY: '¥', EUR: '€' } as Record<string, string>)[c] || c;
+
+  const subject = `📊 Market Day Summary — ${date}`;
+
+  const rows = items.map((s) => {
+    const c = cur(s.currency);
+    const yHigh = s.yesterdayHigh != null ? `${c}${s.yesterdayHigh.toFixed(2)}` : '—';
+    const yLow = s.yesterdayLow != null ? `${c}${s.yesterdayLow.toFixed(2)}` : '—';
+    return `<tr>
+      <td style="padding:8px 12px;border-bottom:1px solid #eee;font-weight:600">${s.symbol}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right">${c}${s.todayOpen.toFixed(2)}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right">${c}${s.todayHigh.toFixed(2)}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right">${c}${s.todayLow.toFixed(2)}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;font-weight:600">${c}${s.todayClose.toFixed(2)}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;color:#888">${yHigh}</td>
+      <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;color:#888">${yLow}</td>
+    </tr>`;
+  }).join('');
+
+  const textRows = items.map((s) => {
+    const c = cur(s.currency);
+    const yH = s.yesterdayHigh != null ? `${c}${s.yesterdayHigh.toFixed(2)}` : '—';
+    const yL = s.yesterdayLow != null ? `${c}${s.yesterdayLow.toFixed(2)}` : '—';
+    return `${s.symbol}: Open ${c}${s.todayOpen.toFixed(2)} | High ${c}${s.todayHigh.toFixed(2)} | Low ${c}${s.todayLow.toFixed(2)} | Close ${c}${s.todayClose.toFixed(2)} | Prev High ${yH} | Prev Low ${yL}`;
+  }).join('\n');
+
+  const html = `
+    <div style="font-family:-apple-system,system-ui,sans-serif;max-width:720px;margin:0 auto">
+      <h2 style="margin:0 0 4px;font-size:18px">Market Day Summary</h2>
+      <p style="margin:0 0 16px;color:#666;font-size:13px">${date}</p>
+      <table style="border-collapse:collapse;width:100%;font-size:13px">
+        <thead>
+          <tr style="background:#f8f9fa">
+            <th style="padding:8px 12px;text-align:left;border-bottom:2px solid #dee2e6">Symbol</th>
+            <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #dee2e6">Open</th>
+            <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #dee2e6">High</th>
+            <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #dee2e6">Low</th>
+            <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #dee2e6">Close</th>
+            <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #dee2e6;color:#888">Prev High</th>
+            <th style="padding:8px 12px;text-align:right;border-bottom:2px solid #dee2e6;color:#888">Prev Low</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+      <p style="margin:16px 0 0;font-size:11px;color:#999">Sent by SignalStack</p>
+    </div>`;
+
+  const text = `Market Day Summary — ${date}\n\n${textRows}`;
+
+  return sendEmail({ to, subject, text, html });
+}
+
 const RSI_SIGNAL_LABEL: Record<string, string> = {
   overboughtCross: 'Overbought cross',
   oversoldCross: 'Oversold cross',

@@ -50,6 +50,16 @@ function validateRsi(raw: unknown): { rsi?: RsiConfig; error?: string } {
     }
   }
 
+  // Optional RSI-specific timeframe — must be one of the allowed timeframes if set
+  const validTimeframes = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'];
+  let rsiTimeframe: string | undefined;
+  if (r.timeframe != null) {
+    if (typeof r.timeframe !== 'string' || !validTimeframes.includes(r.timeframe)) {
+      return { error: `rsi.timeframe must be one of: ${validTimeframes.join(', ')}` };
+    }
+    rsiTimeframe = r.timeframe;
+  }
+
   return {
     rsi: {
       enabled: true,
@@ -57,6 +67,7 @@ function validateRsi(raw: unknown): { rsi?: RsiConfig; error?: string } {
       overbought: r.overbought,
       oversold: r.oversold,
       ...(signalLineLength !== undefined ? { signalLineLength } : {}),
+      ...(rsiTimeframe !== undefined ? { timeframe: rsiTimeframe } : {}),
       signals: {
         overboughtCross: !!s.overboughtCross,
         oversoldCross: !!s.oversoldCross,

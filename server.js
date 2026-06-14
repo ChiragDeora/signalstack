@@ -65,6 +65,11 @@ app.prepare().then(async () => {
       .then(r => r.json())
       .then(d => (d.success && d.watchedSymbols?.length > 0 ? console.log('✅ Restored', d.watchedSymbols?.length, 'watch(es)') : null))
       .catch(e => console.warn('⚠️  Monitor restore fetch failed:', e.message));
+    // Point Telegram's webhook at us (no-op on localhost / without a bot token)
+    fetch(`${base}/api/telegram/setup`)
+      .then(r => r.json())
+      .then(d => console.log(d.ok ? `✅ Telegram webhook registered: ${d.webhookUrl}` : `⚠️  Telegram webhook: ${d.reason || d.description}`))
+      .catch(e => console.warn('⚠️  Telegram webhook setup failed:', e.message));
   });
 
   // Graceful shutdown

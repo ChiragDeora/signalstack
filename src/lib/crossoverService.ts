@@ -16,14 +16,19 @@ import {
 import {
   sendCrossoverAlertEmail,
   sendRsiAlertEmail,
+  sendEndOfDaySummaryEmail,
   isBrevoConfigured,
   getAlertRecipientEmails,
+  type DaySummaryItem,
 } from './brevoEmail';
+import { sendCrossoverTelegramAlert, sendRsiTelegramAlert } from './telegram';
+import { pushCrossoverToUser, pushRsiToUser } from './expoPush';
 import { getClerkUserEmail } from './clerkUserEmail';
 import { buildCrossoverChartAttachment } from './alertChart';
 import { appendAlertLog } from './alertLogger';
+import { getAllWatches } from './watchPersistence';
+import { fetchDaySummary } from './daySummary';
 import { CandleData } from './types';
-// marketHours removed — alerts now fire regardless of trading hours
 
 // web-push is optional — only needed for push notifications (see OpenReplay Web Push guide)
 let webpush: any = null;
@@ -140,11 +145,6 @@ export class CrossoverService {
       if (priceData?.candleData && priceData.candleData.length > 0) {
         this.engine.warmUp(config.symbol, config.timeframe, priceData.candleData, config.userId);
 
-        // NOTE: We no longer feed the live LTP as a "seed tick" here.
-        // The warmup already initialises lastRelation on the crossover
-        // detectors using closed-candle EMA values, and processNewCandles
-        // will pick up the next closed candle on the first poll.
-
         // Emit initial price and EMA data
         this.emitPriceUpdate(config.symbol, config.timeframe, priceData, config.userId);
         this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
@@ -152,6 +152,18 @@ export class CrossoverService {
         console.warn(`⚠️  No historical data for warmup of ${config.symbol}`);
         this.emitStatus(config.symbol, config.timeframe, 'running', 'Running without historical warmup — EMAs will initialize from live ticks', config.userId);
         if (priceData) this.emitPriceUpdate(config.symbol, config.timeframe, priceData, config.userId);
+        this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
+      }
+
+      // Separate RSI warmup when RSI uses a different timeframe
+      const rsiTf = config.rsi?.timeframe;
+      if (config.rsi?.enabled && rsiTf && rsiTf !== config.timeframe) {
+        const rsiData = await this.dataSource.fetchTimeframeData(config.symbol, rsiTf, (config.exchange as 'NSE' | 'NFO' | 'BSE') || 'NSE');
+        if (rsiData?.candleData && rsiData.candleData.length > 0) {
+          this.engine.warmUpRsi(config.symbol, config.timeframe, rsiData.candleData, config.userId);
+        } else {
+          console.warn(`⚠️  No historical RSI data for warmup of ${config.symbol} (RSI tf=${rsiTf})`);
+        }
         this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
       }
     } catch (error: any) {
@@ -302,10 +314,35 @@ export class CrossoverService {
       // Emit EMA update (now also carries RSI value if enabled)
       this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
 
-      // Handle alerts (crossover + RSI)
+      // Handle alerts (crossover + RSI from same timeframe)
       this.handleAlerts(crossovers, config.userId, config.exchange, priceData.candleData);
       if (rsi.length > 0) {
         this.handleRsiAlerts(rsi, config.userId);
+      }
+
+      // Separate RSI timeframe: fetch and process RSI candles independently
+      const rsiTf = config.rsi?.timeframe;
+      if (config.rsi?.enabled && rsiTf && rsiTf !== config.timeframe) {
+        try {
+          const rsiData = await this.dataSource.fetchTimeframeData(config.symbol, rsiTf, (config.exchange as 'NSE' | 'NFO' | 'BSE') || 'NSE');
+          if (rsiData?.candleData && rsiData.candleData.length > 0) {
+            const rsiAlerts = this.engine.processNewRsiCandles(
+              config.symbol,
+              config.timeframe,
+              rsiData.candleData,
+              priceData.price,
+              priceData.currency,
+              priceData.source,
+              config.userId,
+            );
+            if (rsiAlerts.length > 0) {
+              this.handleRsiAlerts(rsiAlerts, config.userId);
+            }
+            this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
+          }
+        } catch (rsiErr) {
+          console.error(`❌ RSI poll error for ${config.symbol} (RSI tf=${rsiTf}):`, rsiErr);
+        }
       }
     } catch (error) {
       console.error(`❌ Poll error for ${config.symbol}:`, error);
@@ -347,6 +384,17 @@ export class CrossoverService {
       }
 
       this.sendPushNotification(alert, userId);
+
+      // Telegram (best-effort, per-user chat id)
+      if (userId) {
+        sendCrossoverTelegramAlert(userId, alert).catch((e) =>
+          console.warn('Crossover Telegram alert failed:', e?.message || e),
+        );
+        // Expo / React Native push (best-effort)
+        pushCrossoverToUser(userId, alert).catch((e) =>
+          console.warn('Crossover Expo push failed:', e?.message || e),
+        );
+      }
 
       // Find the candle that produced this alert (for the close price column)
       const matchedCandle = candleData?.find(
@@ -415,6 +463,17 @@ export class CrossoverService {
       userEmailPromise
         .then((email) => sendRsiAlertEmail(alert, email))
         .catch((e) => console.warn('RSI email alert failed:', e));
+
+      // Telegram (best-effort, per-user chat id)
+      if (userId) {
+        sendRsiTelegramAlert(userId, alert).catch((e) =>
+          console.warn('RSI Telegram alert failed:', e?.message || e),
+        );
+        // Expo / React Native push (best-effort)
+        pushRsiToUser(userId, alert).catch((e) =>
+          console.warn('RSI Expo push failed:', e?.message || e),
+        );
+      }
     }
   }
 
@@ -594,6 +653,111 @@ export class CrossoverService {
       }
     }
     return { sent, failed };
+  }
+
+  // =========================
+  // End-of-day Summary Email
+  // =========================
+
+  private eodCronJob: cron.ScheduledTask | null = null;
+
+  scheduleEndOfDaySummary(): void {
+    if (this.eodCronJob) return;
+    // 3:35 PM IST (Mon–Fri) — 5 minutes after NSE close
+    this.eodCronJob = cron.schedule('35 15 * * 1-5', () => {
+      console.log('📧 End-of-day summary: triggered');
+      this.sendEndOfDaySummary().catch((e) => console.error('EOD summary failed:', e));
+    }, { timezone: 'Asia/Kolkata' });
+    console.log('📧 End-of-day summary scheduled: 3:35 PM IST, Mon–Fri');
+  }
+
+  async sendEndOfDaySummary(): Promise<void> {
+    if (!isBrevoConfigured()) {
+      console.log('📧 EOD summary: Brevo not configured, skipping');
+      return;
+    }
+
+    const watches = await getAllWatches();
+    if (watches.length === 0) return;
+
+    // Group watches by userId — deduplicate symbols per user
+    const byUser = new Map<string, Set<string>>();
+    const exchangeBySymbol = new Map<string, string>();
+    const currencyBySymbol = new Map<string, string>();
+    for (const w of watches) {
+      const uid = w.userId || '';
+      if (!uid) continue;
+      if (!byUser.has(uid)) byUser.set(uid, new Set());
+      byUser.get(uid)!.add(w.symbol.toUpperCase());
+      exchangeBySymbol.set(w.symbol.toUpperCase(), w.exchange || 'NSE');
+      currencyBySymbol.set(w.symbol.toUpperCase(), w.currency || 'INR');
+    }
+
+    const today = new Date().toLocaleDateString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+      weekday: 'short',
+    });
+
+    // Collect OHLC data for all unique symbols
+    const allSymbols = new Set<string>();
+    for (const syms of byUser.values()) for (const s of syms) allSymbols.add(s);
+
+    const ohlcCache = new Map<string, DaySummaryItem>();
+    for (const symbol of allSymbols) {
+      try {
+        const exchange = (exchangeBySymbol.get(symbol) || 'NSE') as 'NSE' | 'NFO' | 'BSE';
+        const currency = currencyBySymbol.get(symbol) || 'INR';
+
+        const summary = await fetchDaySummary(symbol, exchange, this.dataSource);
+        if (!summary) continue;
+
+        ohlcCache.set(symbol, {
+          symbol,
+          currency,
+          todayOpen: summary.today.open,
+          todayHigh: summary.today.high,
+          todayLow: summary.today.low,
+          todayClose: summary.today.close,
+          yesterdayHigh: summary.yesterday?.high ?? null,
+          yesterdayLow: summary.yesterday?.low ?? null,
+        });
+      } catch (e) {
+        console.warn(`📧 EOD: failed to fetch ${symbol}:`, e);
+      }
+    }
+
+    if (ohlcCache.size === 0) {
+      console.log('📧 EOD summary: no OHLC data collected, skipping emails');
+      return;
+    }
+
+    // Send one email per user
+    for (const [userId, symbolSet] of byUser) {
+      try {
+        const email = await getClerkUserEmail(userId);
+        if (!email) continue;
+
+        const items: DaySummaryItem[] = [];
+        for (const sym of symbolSet) {
+          const data = ohlcCache.get(sym);
+          if (data) items.push(data);
+        }
+        if (items.length === 0) continue;
+
+        items.sort((a, b) => a.symbol.localeCompare(b.symbol));
+        const result = await sendEndOfDaySummaryEmail(email, items, today);
+        if (result.ok) {
+          console.log(`📧 EOD summary sent to ${email} (${items.length} symbols)`);
+        } else {
+          console.warn(`📧 EOD summary failed for ${email}: ${result.error}`);
+        }
+      } catch (e) {
+        console.warn(`📧 EOD summary error for user ${userId}:`, e);
+      }
+    }
   }
 
   // =========================

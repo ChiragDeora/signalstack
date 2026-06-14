@@ -8,6 +8,7 @@ import React from 'react';
 import {
   Activity, ArrowUp, ArrowDown, TrendingUp, TrendingDown, Plus, SlidersHorizontal,
 } from 'lucide-react';
+import type { DaySummary } from '@/lib/daySummary';
 
 export const CURRENCY: Record<string, string> = { INR: '₹', USD: '$', GBP: '£', EUR: '€', JPY: '¥' };
 export function fmtPrice(v: number | null | undefined, currency = 'INR'): string {
@@ -90,11 +91,13 @@ export interface SpotlightProps {
   symbol: string; name?: string; exchange: string; currency: string;
   price: number | null; change: number; changePercent: number; flash: '' | 'flash-up' | 'flash-down';
   priceError?: string;
-  timeframe: string; timeframes: string[]; onTimeframe: (tf: string) => void;
+  emaTimeframe: string;
+  rsiTimeframe?: string;
   fastPeriod?: number; slowPeriod?: number; fastVal: number | null; slowVal: number | null;
   rsi: number | null;
   rsiPeriod?: number;
   connected: boolean;
+  daySummary?: DaySummary | null;
 }
 
 /* ---- Selected-symbol spotlight ---- */
@@ -139,10 +142,18 @@ export function Spotlight(p: SpotlightProps) {
         </div>
       )}
 
-      <div className="spot-tf">
-        {p.timeframes.map((tf) => (
-          <button key={tf} type="button" className={`tf ${p.timeframe === tf ? 'active' : ''}`} onClick={() => p.onTimeframe(tf)}>{tf}</button>
-        ))}
+      <div className="spot-tf-readout">
+        <span className="spot-tf-chip">
+          <span className="spot-tf-chip-label">EMA</span>
+          <span className="spot-tf-chip-val">{p.emaTimeframe}</span>
+        </span>
+        {p.rsiTimeframe && p.rsiTimeframe !== p.emaTimeframe && (
+          <span className="spot-tf-chip">
+            <span className="spot-tf-chip-label">RSI</span>
+            <span className="spot-tf-chip-val">{p.rsiTimeframe}</span>
+          </span>
+        )}
+        <span className="spot-tf-hint">Change in Indicators →</span>
       </div>
 
       <div className="cross-readout">
@@ -172,6 +183,27 @@ export function Spotlight(p: SpotlightProps) {
           </span>
         </div>
       </div>
+
+      {p.daySummary && (
+        <div className="spot-day">
+          <div className="spot-day-row">
+            <span className="spot-day-label">Today</span>
+            <span className="spot-day-chip"><b>O</b>{fmtPrice(p.daySummary.today.open, p.currency)}</span>
+            <span className="spot-day-chip"><b>H</b>{fmtPrice(p.daySummary.today.high, p.currency)}</span>
+            <span className="spot-day-chip"><b>L</b>{fmtPrice(p.daySummary.today.low, p.currency)}</span>
+            <span className="spot-day-chip"><b>C</b>{fmtPrice(p.daySummary.today.close, p.currency)}</span>
+          </div>
+          {p.daySummary.yesterday && (
+            <div className="spot-day-row">
+              <span className="spot-day-label">Yesterday</span>
+              <span className="spot-day-chip"><b>O</b>{fmtPrice(p.daySummary.yesterday.open, p.currency)}</span>
+              <span className="spot-day-chip"><b>H</b>{fmtPrice(p.daySummary.yesterday.high, p.currency)}</span>
+              <span className="spot-day-chip"><b>L</b>{fmtPrice(p.daySummary.yesterday.low, p.currency)}</span>
+              <span className="spot-day-chip"><b>C</b>{fmtPrice(p.daySummary.yesterday.close, p.currency)}</span>
+            </div>
+          )}
+        </div>
+      )}
     </section>
   );
 }

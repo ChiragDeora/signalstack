@@ -53,6 +53,7 @@ export interface RsiAlert {
   id: string;
   type: 'rsi';
   symbol: string;
+  /** Timeframe of the candles RSI was computed from (may differ from the watch's EMA timeframe). */
   timeframe: string;
   signalType: 'overboughtCross' | 'oversoldCross' | 'thresholdBreach' | 'centerlineCross' | 'signalLineCross';
   direction: 'bullish' | 'bearish';
@@ -94,6 +95,12 @@ export interface RsiConfig {
   oversold: number;
   /** EMA length for the signal line. Only used when signals.signalLineCross is true. */
   signalLineLength?: number;
+  /**
+   * Optional timeframe override. When set, RSI is computed from candles of THIS
+   * timeframe instead of the watch's main (EMA) timeframe. e.g. EMA on 5m,
+   * RSI on 15m. When undefined, RSI uses the watch's timeframe (legacy behavior).
+   */
+  timeframe?: string;
   signals: {
     overboughtCross: boolean;
     oversoldCross: boolean;
