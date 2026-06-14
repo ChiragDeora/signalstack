@@ -1,0 +1,50 @@
+{
+  "expo": {
+    "name": "SignalStack",
+    "slug": "signalstack",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./src/assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "scheme": "signalstack",
+    "splash": {
+      "image": "./src/assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0b1220"
+    },
+    "android": {
+      "package": "app.signalstack.mobile",
+      "versionCode": 1,
+      "adaptiveIcon": {
+        "foregroundImage": "./src/assets/icon.png",
+        "backgroundColor": "#0b1220"
+      },
+      "permissions": [
+        "NOTIFICATIONS",
+        "VIBRATE",
+        "INTERNET"
+      ]
+    },
+    "ios": {
+      "bundleIdentifier": "app.signalstack.mobile",
+      "supportsTablet": true
+    },
+    "plugins": [
+      [
+        "expo-notifications",
+        {
+          "color": "#1f6dff",
+          "defaultChannel": "alerts"
+        }
+      ]
+    ],
+    "extra": {
+      "apiBaseUrl": "https://signalstack-105d.onrender.com",
+      "clerkPublishableKey": "pk_test_d2hvbGUtc2hyaW1wLTI1LmNsZXJrLmFjY291bnRzLmRldiQ",
+      "eas": {
+        "projectId": "dced905c-19b9-4905-9272-92fbd58d5541"
+      }
+    },
+    "owner": "chiragdeora"
+  }
+}
