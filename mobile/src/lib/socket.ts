@@ -12,7 +12,10 @@ export function getSocket(): Socket {
   if (socket) return socket; // reuse — let socket.io reconnect itself
   socket = io(API_BASE_URL, {
     path: '/socket.io',
-    transports: ['websocket'],
+    // Let socket.io use polling first then upgrade to websocket. Render's free
+    // tier occasionally fails the ws upgrade on cold start, and websocket-only
+    // leaves the client stuck OFFLINE forever in that case.
+    transports: ['polling', 'websocket'],
     reconnection: true,
     reconnectionAttempts: Infinity,
     reconnectionDelay: 1000,

@@ -143,6 +143,33 @@ export function ConfigScreen(p: Props) {
               </TouchableOpacity>
             ))}
           </View>
+
+          {/* Crossover pairs tracked — mirrors web .pair-list / .pair-item */}
+          <Text style={[styles.label, { color: t.muted, marginTop: 14 }]}>Crossover pairs tracked</Text>
+          {(() => {
+            const sorted = [...p.emas].map((e) => e.period).sort((a, b) => a - b);
+            const pairs: Array<[number, number]> = [];
+            for (let i = 0; i < sorted.length - 1; i++) pairs.push([sorted[i], sorted[i + 1]]);
+            if (pairs.length === 0) {
+              return (
+                <View style={[styles.pairEmpty, { borderColor: t.border, backgroundColor: t.surface2 }]}>
+                  <Text style={{ color: t.muted, fontSize: 12 }}>Add at least two EMAs to track a crossover.</Text>
+                </View>
+              );
+            }
+            return (
+              <View style={styles.pairList}>
+                {pairs.map(([f, s]) => (
+                  <View key={`${f}-${s}`} style={[styles.pairItem, { backgroundColor: t.surface2, borderColor: t.border }]}>
+                    <Text style={[styles.pairFast, { color: t.ink }]}>{f}</Text>
+                    <Activity size={13} color={t.muted} />
+                    <Text style={[styles.pairSlow, { color: t.ink }]}>{s}</Text>
+                    <Text style={[styles.pairLabel, { color: t.muted }]}>fast / slow</Text>
+                  </View>
+                ))}
+              </View>
+            );
+          })()}
         </View>
       </View>
 
@@ -259,6 +286,12 @@ const styles = StyleSheet.create({
   emaPill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 8, borderWidth: 1 },
   emaAdd: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8, borderWidth: 1 },
   quickEma: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 8, borderWidth: 1 },
+  pairList: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 4 },
+  pairItem: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 8, borderRadius: 10, borderWidth: 1 },
+  pairEmpty: { padding: 10, borderRadius: 10, borderWidth: 1, marginTop: 4 },
+  pairFast: { fontFamily: 'Menlo', fontWeight: '800', fontSize: 13 },
+  pairSlow: { fontFamily: 'Menlo', fontWeight: '800', fontSize: 13 },
+  pairLabel: { fontSize: 11, fontWeight: '600', marginLeft: 4 },
   rsiFields: { flexDirection: 'row', gap: 8, marginTop: 6 },
   rsiField: { flex: 1, padding: 10, borderRadius: 10, borderWidth: 1 },
   signalItem: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderRadius: 12, borderWidth: 1, marginTop: 6 },

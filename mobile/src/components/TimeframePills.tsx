@@ -39,7 +39,9 @@ export function TimeframePills({ value, defaultValue, onChange }: Props) {
 }
 
 const styles = StyleSheet.create({
-  row: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginVertical: 8 },
-  pill: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 9, borderWidth: 1, minWidth: 42, alignItems: 'center' },
-  txt: { fontFamily: 'Menlo', fontSize: 11.5, fontWeight: '700' },
+  // Equal-flex columns so all 7 timeframes fit on one row (no wrap),
+  // matching the PWA's `.spot-tf` grid layout.
+  row: { flexDirection: 'row', gap: 5, marginVertical: 8 },
+  pill: { flex: 1, paddingVertical: 7, borderRadius: 8, borderWidth: 1, alignItems: 'center' },
+  txt: { fontFamily: 'Menlo', fontSize: 11, fontWeight: '700' },
 });

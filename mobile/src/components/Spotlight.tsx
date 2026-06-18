@@ -1,7 +1,7 @@
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { TrendingUp, TrendingDown, ArrowUp, ArrowDown } from 'lucide-react-native';
-import { formatPrice, useTheme } from '@/lib/theme';
+import { formatPrice, useTheme, TIMEFRAMES } from '@/lib/theme';
 import { LivePill } from './LivePill';
 import type { DaySummary } from '@/lib/types';
 
@@ -24,14 +24,17 @@ interface Props {
   connected: boolean;
   priceError?: string;
   daySummary?: DaySummary | null;
+  onChangeTimeframe?: (tf: string) => void;
 }
 
 export function Spotlight(p: Props) {
   const t = useTheme();
+  const havePrice = p.price != null;
   const up = p.changePercent >= 0;
   const haveEmas = p.fastVal != null && p.slowVal != null;
-  const bull = haveEmas ? (p.fastVal as number) >= (p.slowVal as number) : true;
-  const dirColor = bull ? t.bull : t.bear;
+  const bull = haveEmas ? (p.fastVal as number) >= (p.slowVal as number) : false;
+  const dirColor = haveEmas ? (bull ? t.bull : t.bear) : t.muted;
+  const priceColor = !havePrice ? t.muted : up ? t.bull : t.bear;
 
   return (
     <View style={[styles.card, { backgroundColor: t.surface, borderColor: t.border }]}>
@@ -61,7 +64,7 @@ export function Spotlight(p: Props) {
         </View>
       ) : (
         <View style={styles.priceRow}>
-          <Text style={[styles.price, { color: up ? t.bull : t.bear }]}>{formatPrice(p.price, p.currency)}</Text>
+          <Text style={[styles.price, { color: priceColor }]}>{formatPrice(p.price, p.currency)}</Text>
           {p.price != null && (
             <View style={styles.chgRow}>
               {up ? <TrendingUp size={14} color={t.bull} /> : <TrendingDown size={14} color={t.bear} />}
@@ -73,27 +76,38 @@ export function Spotlight(p: Props) {
         </View>
       )}
 
-      <View style={styles.tfChips}>
-        <View style={[styles.tfChip, { backgroundColor: t.surface2, borderColor: t.border }]}>
-          <Text style={[styles.tfChipLabel, { color: t.muted }]}>EMA</Text>
-          <Text style={[styles.tfChipVal, { color: t.ink }]}>{p.emaTimeframe}</Text>
-        </View>
-        {p.rsiTimeframe && p.rsiTimeframe !== p.emaTimeframe && (
-          <View style={[styles.tfChip, { backgroundColor: t.surface2, borderColor: t.border }]}>
-            <Text style={[styles.tfChipLabel, { color: t.muted }]}>RSI</Text>
-            <Text style={[styles.tfChipVal, { color: t.ink }]}>{p.rsiTimeframe}</Text>
-          </View>
-        )}
-        <Text style={[styles.tfHint, { color: t.muted }]}>Change in Indicators →</Text>
+      <View style={styles.tfRow}>
+        {TIMEFRAMES.map((tf) => {
+          const active = p.emaTimeframe === tf;
+          return (
+            <TouchableOpacity
+              key={tf}
+              activeOpacity={0.7}
+              onPress={() => p.onChangeTimeframe?.(tf)}
+              style={[
+                styles.tfPill,
+                {
+                  backgroundColor: active ? t.accent : t.surface2,
+                  borderColor: active ? t.accent : t.border,
+                },
+              ]}
+            >
+              <Text style={[styles.tfPillTxt, { color: active ? '#fff' : t.ink2 }]}>{tf}</Text>
+            </TouchableOpacity>
+          );
+        })}
       </View>
+      {p.rsiTimeframe && p.rsiTimeframe !== p.emaTimeframe && (
+        <Text style={[styles.tfHint, { color: t.muted }]}>RSI on {p.rsiTimeframe}</Text>
+      )}
 
       <View style={styles.crossRow}>
-        <View style={[styles.crossSide, { backgroundColor: bull ? t.bullBg : t.bearBg, borderColor: dirColor + '55' }]}>
-          <Text style={[styles.csLabel, { color: dirColor }]}>EMA {p.fastPeriod ?? '—'} · FAST</Text>
+        <View style={[styles.crossSide, { backgroundColor: haveEmas ? (bull ? t.bullBg : t.bearBg) : t.surface2, borderColor: haveEmas ? dirColor + '55' : t.border }]}>
+          <Text style={[styles.csLabel, { color: haveEmas ? dirColor : t.muted }]}>EMA {p.fastPeriod ?? '—'} · FAST</Text>
           <Text style={[styles.csVal, { color: t.ink }]}>{p.fastVal != null ? p.fastVal.toFixed(2) : '—'}</Text>
         </View>
         <View style={[styles.crossNode, { backgroundColor: dirColor }]}>
-          {bull ? <ArrowUp size={18} color="#fff" /> : <ArrowDown size={18} color="#fff" />}
+          {haveEmas ? (bull ? <ArrowUp size={18} color="#fff" /> : <ArrowDown size={18} color="#fff" />) : <ArrowUp size={18} color="#fff" />}
         </View>
         <View style={[styles.crossSide, { backgroundColor: t.surface2, borderColor: t.border }]}>
           <Text style={[styles.csLabel, { color: t.muted }]}>EMA {p.slowPeriod ?? '—'} · SLOW</Text>
@@ -117,7 +131,7 @@ export function Spotlight(p: Props) {
       {p.daySummary && (
         <View style={styles.dayBlock}>
           <View style={styles.dayRow}>
-            <Text style={[styles.dayLabel, { color: t.muted }]}>Today</Text>
+            <Text style={[styles.dayLabel, { color: t.muted }]} numberOfLines={1}>Today</Text>
             <DayChip t={t} label="O" value={formatPrice(p.daySummary.today.open, p.currency)} />
             <DayChip t={t} label="H" value={formatPrice(p.daySummary.today.high, p.currency)} />
             <DayChip t={t} label="L" value={formatPrice(p.daySummary.today.low, p.currency)} />
@@ -125,7 +139,7 @@ export function Spotlight(p: Props) {
           </View>
           {p.daySummary.yesterday && (
             <View style={styles.dayRow}>
-              <Text style={[styles.dayLabel, { color: t.muted }]}>Yesterday</Text>
+              <Text style={[styles.dayLabel, { color: t.muted }]} numberOfLines={1}>Yesterday</Text>
               <DayChip t={t} label="O" value={formatPrice(p.daySummary.yesterday.open, p.currency)} />
               <DayChip t={t} label="H" value={formatPrice(p.daySummary.yesterday.high, p.currency)} />
               <DayChip t={t} label="L" value={formatPrice(p.daySummary.yesterday.low, p.currency)} />
@@ -163,11 +177,10 @@ const styles = StyleSheet.create({
   chgTxt: { fontFamily: 'Menlo', fontSize: 13, fontWeight: '700' },
   err: { padding: 10, borderRadius: 10, borderWidth: 1 },
   errTxt: { fontSize: 12, fontWeight: '600' },
-  tfChips: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, marginTop: 4 },
-  tfChip: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 8, borderWidth: 1 },
-  tfChipLabel: { fontSize: 10, fontWeight: '700', letterSpacing: 0.4 },
-  tfChipVal: { fontFamily: 'Menlo', fontSize: 12, fontWeight: '700' },
-  tfHint: { fontSize: 11 },
+  tfRow: { flexDirection: 'row', gap: 5, marginTop: 10, marginBottom: 4 },
+  tfPill: { flex: 1, paddingVertical: 7, borderRadius: 8, borderWidth: 1, alignItems: 'center' },
+  tfPillTxt: { fontFamily: 'Menlo', fontSize: 12, fontWeight: '700' },
+  tfHint: { fontSize: 11, marginTop: 2 },
   crossRow: { flexDirection: 'row', alignItems: 'stretch', gap: 8, marginTop: 6 },
   crossSide: { flex: 1, padding: 10, borderRadius: 12, borderWidth: 1 },
   csLabel: { fontSize: 10, fontWeight: '700', letterSpacing: 0.4, textTransform: 'uppercase' },
@@ -179,7 +192,7 @@ const styles = StyleSheet.create({
   statVal: { fontFamily: 'Menlo', fontSize: 16, fontWeight: '800', marginTop: 4 },
   dayBlock: { gap: 6, marginTop: 4 },
   dayRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 },
-  dayLabel: { fontSize: 10, fontWeight: '700', letterSpacing: 0.4, textTransform: 'uppercase', width: 64 },
+  dayLabel: { fontSize: 10, fontWeight: '700', letterSpacing: 0.4, textTransform: 'uppercase', minWidth: 76 },
   dayChip: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, borderWidth: 1 },
   dayChipLabel: { fontSize: 10, fontWeight: '700' },
   dayChipVal: { fontFamily: 'Menlo', fontSize: 12, fontWeight: '600' },

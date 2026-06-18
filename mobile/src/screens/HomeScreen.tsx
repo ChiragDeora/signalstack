@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, ActivityIndicator } from 'react-native';
-import { Activity, Plus, SlidersHorizontal, Settings as SettingsIcon, Layers } from 'lucide-react-native';
-import { useAuth } from '@clerk/clerk-expo';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, ActivityIndicator, Modal, Pressable } from 'react-native';
+import Svg, { Circle, Line } from 'react-native-svg';
+import { Activity, Plus, SlidersHorizontal, Settings as SettingsIcon, Layers, User, LogOut, X } from 'lucide-react-native';
+import { useAuth, useUser, useClerk } from '@clerk/clerk-expo';
 import { useTheme, DEFAULT_TIMEFRAME, COLORS } from '@/lib/theme';
 import { api, setAuthToken } from '@/lib/api';
 import { getSocket, joinUserRoom } from '@/lib/socket';
@@ -29,10 +30,40 @@ function rsiPayloadToUi(p: any): RsiUiConfig {
   };
 }
 
+function Logo({ size = 36, color = '#fff' }: { size?: number; color?: string }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 40 40" fill="none">
+      <Line x1={11} y1={29} x2={11} y2={23} stroke={color} strokeWidth={3.1} strokeLinecap="round" opacity={0.55} />
+      <Line x1={17} y1={29} x2={17} y2={19} stroke={color} strokeWidth={3.1} strokeLinecap="round" opacity={0.78} />
+      <Line x1={23} y1={29} x2={23} y2={14} stroke={color} strokeWidth={3.1} strokeLinecap="round" />
+      <Line x1={29} y1={29} x2={29} y2={9} stroke={color} strokeWidth={3.1} strokeLinecap="round" />
+      <Circle cx={29} cy={9} r={3.1} fill={color} />
+    </Svg>
+  );
+}
+
+function EmptyState({ onAdd, t }: { onAdd: () => void; t: ReturnType<typeof useTheme> }) {
+  return (
+    <View style={[styles.emptyCard, { backgroundColor: t.surface, borderColor: t.border }]}>
+      <Text style={[styles.emptyTitle, { color: t.ink }]}>Add your first symbol</Text>
+      <Text style={[styles.emptySub, { color: t.muted }]}>
+        Search NSE, NFO or BSE, set your EMA periods and RSI, then start monitoring for crossover alerts.
+      </Text>
+      <TouchableOpacity activeOpacity={0.85} style={[styles.emptyCta, { backgroundColor: t.accent }]} onPress={onAdd}>
+        <Plus size={18} color="#fff" />
+        <Text style={styles.emptyCtaTxt}>Search symbols</Text>
+      </TouchableOpacity>
+    </View>
+  );
+}
+
 export function HomeScreen() {
   const t = useTheme();
   const { userId, getToken } = useAuth();
+  const { user } = useUser();
+  const { signOut } = useClerk();
   const [tab, setTab] = useState<'live' | 'config' | 'tools'>('live');
+  const [accountOpen, setAccountOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [connected, setConnected] = useState(false);
 
@@ -98,9 +129,15 @@ export function HomeScreen() {
     if (!userId) return;
     (async () => {
       try {
+        // Ensure the JWT is in axios *before* the first call. The other token
+        // refresh effect races with this one — without this, the initial
+        // /api/user/config goes out without auth, gets 401, and we silently
+        // render an empty UI.
+        const tok = await getToken();
+        if (tok) setAuthToken(tok);
         const [cfg, watches] = await Promise.all([
-          api.get<{ success: boolean; config?: any }>('/api/user/config').catch(() => null),
-          api.get<{ success: boolean; watches?: MonitoredWatch[] }>('/api/user/watches').catch(() => null),
+          api.get<{ success: boolean; config?: any }>('/api/user/config').catch((e) => { if (__DEV__) console.warn('[restore] /api/user/config failed:', e?.response?.status, e?.message); return null; }),
+          api.get<{ success: boolean; watches?: MonitoredWatch[] }>('/api/user/watches').catch((e) => { if (__DEV__) console.warn('[restore] /api/user/watches failed:', e?.response?.status, e?.message); return null; }),
         ]);
         if (cfg?.data.success && cfg.data.config) {
           const c = cfg.data.config;
@@ -287,9 +324,36 @@ export function HomeScreen() {
   return (
     <View style={[styles.root, { backgroundColor: t.bg }]}>
       <View style={[styles.topbar, { borderBottomColor: t.border }]}>
-        <Text style={[styles.brand, { color: t.ink }]}>Signal<Text style={{ color: t.accent }}>Stack</Text></Text>
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+        <View style={styles.wordmark}>
+          <View style={[styles.logoBox, { backgroundColor: t.accent }]}>
+            <Logo size={22} />
+          </View>
+          <View>
+            <Text style={[styles.brand, { color: t.ink }]}>Signal<Text style={{ color: t.accent }}>Stack</Text></Text>
+            <Text style={[styles.brandTag, { color: t.muted }]}>EMA · RSI crossover alerts</Text>
+          </View>
+        </View>
+        <View style={styles.topbarRight}>
           <LivePill connected={connected} />
+          <TouchableOpacity
+            onPress={() => setTab(tab === 'tools' ? 'live' : 'tools')}
+            style={[styles.iconBtn, { backgroundColor: tab === 'tools' ? t.accentSoft : t.surface2, borderColor: t.border }]}
+          >
+            <SettingsIcon size={16} color={tab === 'tools' ? t.accent : t.ink2} />
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => setAccountOpen(true)} activeOpacity={0.8}>
+            <View style={[styles.avatar, { backgroundColor: t.accent }]}>
+              {(() => {
+                const initial =
+                  (user?.firstName?.[0] ||
+                    user?.primaryEmailAddress?.emailAddress?.[0] ||
+                    '').toUpperCase();
+                return initial
+                  ? <Text style={styles.avatarTxt}>{initial}</Text>
+                  : <User size={16} color="#fff" />;
+              })()}
+            </View>
+          </TouchableOpacity>
         </View>
       </View>
 
@@ -298,6 +362,11 @@ export function HomeScreen() {
       ) : null}
 
       {tab === 'live' ? (
+        symbols.length === 0 ? (
+          <View style={{ padding: 16, paddingBottom: 100 }}>
+            <EmptyState onAdd={() => setSearchOpen(true)} t={t} />
+          </View>
+        ) : (
         <ScrollView contentContainerStyle={{ padding: 16, gap: 14, paddingBottom: 100 }}>
           {displaySymbol && (
             <Spotlight
@@ -318,42 +387,77 @@ export function HomeScreen() {
               rsiPeriod={liveRsi?.period}
               connected={connected}
               daySummary={daySummaryBySymbol[displaySymbol] ?? null}
+              onChangeTimeframe={(tf) => displaySymbol && changeEmaTimeframe(displaySymbol, tf)}
             />
           )}
 
-          {/* EMA + RSI panels */}
+          {/* EMA stack panel (full width) */}
           {displaySymbol && (
-            <View style={{ flexDirection: 'row', gap: 10 }}>
-              <View style={[panel.box, { backgroundColor: t.surface, borderColor: t.border, flex: 1 }]}>
-                <View style={panel.head}><Layers size={14} color={t.ink2} /><Text style={[panel.title, { color: t.ink2 }]}>EMA stack</Text></View>
-                {emas.length === 0 ? (
-                  <Text style={{ color: t.muted, fontSize: 12 }}>No EMAs yet.</Text>
-                ) : (
-                  [...emas].sort((a, b) => a.period - b.period).map((e) => {
-                    const val = emaByKey[displayKey]?.[e.period];
-                    const warm = warmupByKey[displayKey]?.[e.period] ?? (monitored.has(displaySymbol) ? 0 : 1);
-                    return (
-                      <View key={e.id} style={panel.emaRow}>
-                        <View style={[panel.dot, { backgroundColor: e.color }]} />
-                        <Text style={[panel.emaLabel, { color: t.ink }]}>EMA {e.period}</Text>
-                        <Text style={[panel.emaNum, { color: t.ink2 }]}>{warm >= 1 && val != null ? val.toFixed(2) : `${Math.round(warm * 100)}%`}</Text>
-                      </View>
-                    );
-                  })
+            <View style={[panel.box, { backgroundColor: t.surface, borderColor: t.border }]}>
+              <View style={panel.head}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1 }}>
+                  <Layers size={14} color={t.ink2} />
+                  <Text style={[panel.title, { color: t.ink2 }]}>EMA stack</Text>
+                </View>
+                {stackedFor(displaySymbol) && (
+                  <Text style={{ color: stackedFor(displaySymbol) === 'bull' ? t.bull : t.bear, fontSize: 11, fontWeight: '700' }}>
+                    {stackedFor(displaySymbol) === 'bull' ? 'Bullish' : 'Bearish'}
+                  </Text>
                 )}
               </View>
-              <View style={[panel.box, { backgroundColor: t.surface, borderColor: t.border, flex: 1 }]}>
-                <View style={panel.head}><Activity size={14} color={t.ink2} /><Text style={[panel.title, { color: t.ink2 }]}>RSI ({liveRsi?.period ?? rsiUi.period})</Text></View>
-                <RsiMeter value={liveRsi?.value ?? null} period={liveRsi?.period ?? parseInt(rsiUi.period || '14', 10)} warmup={liveRsi?.warmupProgress ?? 1} overbought={parseInt(rsiUi.overbought || '70', 10)} oversold={parseInt(rsiUi.oversold || '30', 10)} />
-              </View>
+              {emas.length === 0 ? (
+                <Text style={{ color: t.muted, fontSize: 12 }}>No EMAs yet — add them in Indicators.</Text>
+              ) : (
+                [...emas].sort((a, b) => a.period - b.period).map((e) => {
+                  const val = emaByKey[displayKey]?.[e.period];
+                  const warm = warmupByKey[displayKey]?.[e.period] ?? (monitored.has(displaySymbol) ? 0 : 1);
+                  const ready = warm >= 1;
+                  return (
+                    <View key={e.id} style={panel.emaRow}>
+                      <View style={[panel.dot, { backgroundColor: e.color }]} />
+                      <Text style={[panel.emaLabel, { color: t.ink }]}>EMA {e.period}</Text>
+                      <View style={[panel.emaBar, { backgroundColor: t.surface2 }]}>
+                        <View style={{ width: `${Math.round(warm * 100)}%`, height: '100%', backgroundColor: e.color, borderRadius: 999 }} />
+                      </View>
+                      <Text style={[panel.emaNum, { color: t.ink2 }]}>
+                        {ready && val != null ? val.toFixed(2) : `${Math.round(warm * 100)}%`}
+                      </Text>
+                    </View>
+                  );
+                })
+              )}
             </View>
           )}
 
-          <TouchableOpacity onPress={() => setTab('config')} style={[panel.cfgBtn, { backgroundColor: t.surface, borderColor: t.border }]}>
-            <SettingsIcon size={16} color={t.ink} />
-            <Text style={{ color: t.ink, fontWeight: '700', flex: 1, marginLeft: 8 }}>Configure indicators</Text>
-            <Text style={{ color: t.muted }}>→</Text>
-          </TouchableOpacity>
+          {/* RSI panel (full width) */}
+          {displaySymbol && (
+            <View style={[panel.box, { backgroundColor: t.surface, borderColor: t.border }]}>
+              <View style={panel.head}>
+                <Activity size={14} color={t.ink2} />
+                <Text style={[panel.title, { color: t.ink2 }]}>RSI ({liveRsi?.period ?? rsiUi.period})</Text>
+              </View>
+              <RsiMeter
+                value={liveRsi?.value ?? null}
+                period={liveRsi?.period ?? parseInt(rsiUi.period || '14', 10)}
+                warmup={liveRsi?.warmupProgress ?? 1}
+                overbought={parseInt(rsiUi.overbought || '70', 10)}
+                oversold={parseInt(rsiUi.oversold || '30', 10)}
+              />
+            </View>
+          )}
+
+          {/* Configure indicators row — matches PWA .detail-config-btn */}
+          {displaySymbol && (
+            <TouchableOpacity
+              activeOpacity={0.82}
+              onPress={() => setTab('config')}
+              style={[panel.cfgBtn, { backgroundColor: t.surface, borderColor: t.border }]}
+            >
+              <SettingsIcon size={16} color={t.ink} />
+              <Text style={[panel.cfgTxt, { color: t.ink }]}>Configure indicators</Text>
+              <Text style={{ color: t.muted, fontSize: 18 }}>›</Text>
+            </TouchableOpacity>
+          )}
 
           {/* Watchlist */}
           <View style={{ marginTop: 8 }}>
@@ -385,6 +489,7 @@ export function HomeScreen() {
             </View>
           </View>
         </ScrollView>
+        )
       ) : tab === 'config' ? (
         <ConfigScreen
           symbol={displaySymbol}
@@ -411,22 +516,26 @@ export function HomeScreen() {
         <ToolsScreen />
       )}
 
-      {/* Bottom nav */}
+      {/* Bottom nav — mirrors .bottom-nav / .nav-item.active / .nav-add from the PWA */}
       <View style={[styles.nav, { backgroundColor: t.surface, borderColor: t.border }]}>
-        <TouchableOpacity style={styles.navItem} onPress={() => setTab('live')}>
-          <Activity size={22} color={tab === 'live' ? t.accent : t.muted} />
-          <Text style={[styles.navTxt, { color: tab === 'live' ? t.accent : t.muted }]}>Live</Text>
+        <TouchableOpacity
+          activeOpacity={0.85}
+          style={[styles.navItem, tab === 'live' && { backgroundColor: t.accentSoft }]}
+          onPress={() => setTab('live')}
+        >
+          <Activity size={20} color={tab === 'live' ? t.accentInk : t.muted} />
+          <Text style={[styles.navTxt, { color: tab === 'live' ? t.accentInk : t.muted }]}>Live</Text>
         </TouchableOpacity>
         <TouchableOpacity style={[styles.navAdd, { backgroundColor: t.accent }]} onPress={() => setSearchOpen(true)}>
           <Plus size={24} color="#fff" />
         </TouchableOpacity>
-        <TouchableOpacity style={styles.navItem} onPress={() => setTab('config')}>
-          <SlidersHorizontal size={22} color={tab === 'config' ? t.accent : t.muted} />
-          <Text style={[styles.navTxt, { color: tab === 'config' ? t.accent : t.muted }]}>Indicators</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.navItem} onPress={() => setTab('tools')}>
-          <SettingsIcon size={22} color={tab === 'tools' ? t.accent : t.muted} />
-          <Text style={[styles.navTxt, { color: tab === 'tools' ? t.accent : t.muted }]}>Tools</Text>
+        <TouchableOpacity
+          activeOpacity={0.85}
+          style={[styles.navItem, tab === 'config' && { backgroundColor: t.accentSoft }]}
+          onPress={() => setTab('config')}
+        >
+          <SlidersHorizontal size={20} color={tab === 'config' ? t.accentInk : t.muted} />
+          <Text style={[styles.navTxt, { color: tab === 'config' ? t.accentInk : t.muted }]}>Indicators</Text>
         </TouchableOpacity>
       </View>
 
@@ -436,6 +545,45 @@ export function HomeScreen() {
         onAdd={addSymbol}
         onClose={() => setSearchOpen(false)}
       />
+
+      <Modal visible={accountOpen} transparent animationType="fade" onRequestClose={() => setAccountOpen(false)}>
+        <Pressable style={styles.modalBackdrop} onPress={() => setAccountOpen(false)}>
+          <Pressable style={[styles.accountCard, { backgroundColor: t.surface, borderColor: t.border }]} onPress={(e) => e.stopPropagation()}>
+            <View style={styles.accountHead}>
+              <View style={[styles.accountAvatar, { backgroundColor: t.accent }]}>
+                <User size={22} color="#fff" />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={[styles.accountName, { color: t.ink }]} numberOfLines={1}>
+                  {user?.fullName || user?.firstName || 'Account'}
+                </Text>
+                <Text style={[styles.accountEmail, { color: t.muted }]} numberOfLines={1}>
+                  {user?.primaryEmailAddress?.emailAddress || ''}
+                </Text>
+              </View>
+              <TouchableOpacity onPress={() => setAccountOpen(false)} style={styles.accountClose}>
+                <X size={18} color={t.muted} />
+              </TouchableOpacity>
+            </View>
+            <TouchableOpacity
+              activeOpacity={0.85}
+              style={[styles.accountAction, { backgroundColor: t.surface2, borderColor: t.border }]}
+              onPress={() => { setAccountOpen(false); setTab('tools'); }}
+            >
+              <SettingsIcon size={16} color={t.ink} />
+              <Text style={[styles.accountActionTxt, { color: t.ink }]}>Manage account</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              activeOpacity={0.85}
+              style={[styles.accountAction, styles.accountSignOut, { borderColor: t.bear + '55' }]}
+              onPress={async () => { setAccountOpen(false); try { await signOut(); } catch { /* noop */ } }}
+            >
+              <LogOut size={16} color={t.bear} />
+              <Text style={[styles.accountActionTxt, { color: t.bear }]}>Sign out</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }
@@ -444,24 +592,52 @@ const styles = StyleSheet.create({
   root: { flex: 1 },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   topbar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingTop: 8, paddingBottom: 10, borderBottomWidth: 1 },
-  brand: { fontSize: 18, fontWeight: '800' },
+  wordmark: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
+  logoBox: { width: 34, height: 34, borderRadius: 9, alignItems: 'center', justifyContent: 'center' },
+  brand: { fontSize: 16, fontWeight: '800' },
+  brandTag: { fontSize: 10, fontWeight: '600', letterSpacing: 0.2, marginTop: -1 },
+  topbarRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  iconBtn: { width: 30, height: 30, borderRadius: 8, alignItems: 'center', justifyContent: 'center', borderWidth: 1 },
+  avatar: { width: 32, height: 32, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
+  avatarTxt: { color: '#fff', fontWeight: '800', fontSize: 14 },
   banner: { padding: 10, marginHorizontal: 16, marginTop: 10, borderRadius: 10 },
-  nav: { position: 'absolute', left: 16, right: 16, bottom: 16, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingVertical: 8, borderRadius: 24, borderWidth: 1, shadowColor: '#000', shadowOpacity: 0.08, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 6 },
-  navItem: { alignItems: 'center', justifyContent: 'center', gap: 1, paddingVertical: 4, paddingHorizontal: 14 },
-  navTxt: { fontSize: 10, fontWeight: '700' },
-  navAdd: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center', marginTop: -18 },
+  // Matches PWA .bottom-nav: rounded pill, 8px gap, 8px padding, no popped plus button.
+  nav: { position: 'absolute', alignSelf: 'center', bottom: 16, flexDirection: 'row', alignItems: 'center', gap: 8, padding: 8, borderRadius: 999, borderWidth: 1, shadowColor: '#000', shadowOpacity: 0.12, shadowRadius: 16, shadowOffset: { width: 0, height: 6 }, elevation: 8 },
+  // Each item is a 92px column with rounded highlight on active (.nav-item / .nav-item.active).
+  navItem: { alignItems: 'center', justifyContent: 'center', gap: 3, paddingVertical: 8, width: 92, borderRadius: 16 },
+  navTxt: { fontSize: 10.5, fontWeight: '700', letterSpacing: 0.2 },
+  // .nav-add: 52x52, inline, accent bg, white plus.
+  navAdd: { width: 52, height: 52, borderRadius: 26, alignItems: 'center', justifyContent: 'center' },
+  emptyCard: { padding: 28, borderRadius: 18, borderWidth: 1, alignItems: 'center', gap: 12 },
+  emptyTitle: { fontSize: 24, fontWeight: '800', textAlign: 'center' },
+  emptySub: { fontSize: 13, lineHeight: 19, textAlign: 'center', maxWidth: 320 },
+  emptyCta: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 18, paddingVertical: 12, borderRadius: 999, marginTop: 6 },
+  emptyCtaTxt: { color: '#fff', fontWeight: '700', fontSize: 14 },
+  modalBackdrop: { flex: 1, backgroundColor: 'rgba(11,18,32,0.5)', justifyContent: 'center', padding: 24 },
+  accountCard: { borderRadius: 16, borderWidth: 1, padding: 18, gap: 12 },
+  accountHead: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  accountAvatar: { width: 44, height: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
+  accountName: { fontSize: 16, fontWeight: '800' },
+  accountEmail: { fontSize: 12, marginTop: 2 },
+  accountClose: { padding: 4 },
+  accountAction: { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12, borderRadius: 12, borderWidth: 1 },
+  accountSignOut: { backgroundColor: 'rgba(239,68,68,0.08)' },
+  accountActionTxt: { fontSize: 14, fontWeight: '700' },
 });
 
 const panel = StyleSheet.create({
-  box: { padding: 12, borderRadius: 14, borderWidth: 1, gap: 6 },
+  box: { padding: 12, borderRadius: 14, borderWidth: 1, gap: 8 },
   head: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 4 },
-  title: { fontSize: 11, fontWeight: '700' },
-  emaRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  dot: { width: 8, height: 8, borderRadius: 4 },
-  emaLabel: { fontFamily: 'Menlo', fontSize: 11, flex: 1 },
-  emaNum: { fontFamily: 'Menlo', fontSize: 11, fontWeight: '700' },
-  cfgBtn: { flexDirection: 'row', alignItems: 'center', padding: 12, borderRadius: 12, borderWidth: 1 },
+  title: { fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.4 },
+  emaRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  dot: { width: 10, height: 10, borderRadius: 5 },
+  emaLabel: { fontFamily: 'Menlo', fontSize: 12, fontWeight: '700', width: 64 },
+  emaBar: { flex: 1, height: 8, borderRadius: 999, overflow: 'hidden' },
+  emaNum: { fontFamily: 'Menlo', fontSize: 12, fontWeight: '700', minWidth: 56, textAlign: 'right' },
   secHead: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 8 },
   secTitle: { fontSize: 14, fontWeight: '800' },
   secCount: { fontSize: 12, fontWeight: '700' },
+  // .detail-config-btn equivalent
+  cfgBtn: { flexDirection: 'row', alignItems: 'center', gap: 9, padding: 13, borderRadius: 13, borderWidth: 1, shadowColor: '#000', shadowOpacity: 0.04, shadowRadius: 4, shadowOffset: { width: 0, height: 1 }, elevation: 1 },
+  cfgTxt: { fontSize: 13, fontWeight: '600', flex: 1 },
 });

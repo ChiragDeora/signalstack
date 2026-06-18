@@ -15,13 +15,18 @@ export function setAuthToken(token: string | null) {
 
 export const api: AxiosInstance = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 20000,
+  // Render free tier can take ~50s to wake on cold start — give the first
+  // request enough headroom or every page-load is silently empty.
+  timeout: 60000,
 });
 
 api.interceptors.request.use((config) => {
   if (bearerToken) {
     config.headers = config.headers ?? {};
     (config.headers as Record<string, string>).Authorization = `Bearer ${bearerToken}`;
+  } else if (__DEV__) {
+    // Surface silent auth-missing during development — these calls would 401.
+    console.warn('[api] no bearer token for', (config.method || 'get').toUpperCase(), config.url);
   }
   return config;
 });

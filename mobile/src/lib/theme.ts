@@ -2,7 +2,9 @@
  * Theme mirroring the PWA's design tokens so the mobile app feels native to SignalStack.
  * Single source — referenced from every component instead of inline literals.
  */
-import { useColorScheme } from 'react-native';
+// useColorScheme intentionally not used — we lock the mobile app to light to
+// match the PWA's default appearance. A user-toggleable dark mode lives in the
+// Tools panel (same UX as the web).
 
 export interface Theme {
   bg: string;
@@ -59,8 +61,7 @@ const dark: Theme = {
 };
 
 export function useTheme(): Theme {
-  const scheme = useColorScheme();
-  return scheme === 'dark' ? dark : light;
+  return light;
 }
 
 export const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '4h', '1d'] as const;
