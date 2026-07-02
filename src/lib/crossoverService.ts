@@ -25,9 +25,9 @@ import { sendCrossoverTelegramAlert, sendRsiTelegramAlert } from './telegram';
 import { pushCrossoverToUser, pushRsiToUser } from './expoPush';
 import { getClerkUserEmail } from './clerkUserEmail';
 import { buildCrossoverChartAttachment } from './alertChart';
-import { appendAlertLog } from './alertLogger';
+import { appendAlertLog, appendRsiAlertLog } from './alertLogger';
 import { getAllWatches } from './watchPersistence';
-import { fetchDaySummary } from './daySummary';
+import { fetchDaySummary, buildOhlcContextBlock, istDateOf, OHLC_UNAVAILABLE } from './daySummary';
 import { CandleData } from './types';
 
 // web-push is optional — only needed for push notifications (see OpenReplay Web Push guide)
@@ -80,6 +80,11 @@ export class CrossoverService {
   private lastRsiAlertByKey: Map<string, string> = new Map();
   /** Consecutive null/empty-data poll responses per watch — used only for periodic warning logs. */
   private nullPollStreak: Map<string, number> = new Map();
+  // Cache of latest day summary (yesterday OHLC + today's open) per symbol+exchange.
+  // Refreshed in the background by pollSymbol so handleAlerts can read it
+  // synchronously — alerts fire immediately, no extra network wait.
+  private daySummaryCache: Map<string, { ts: number; data: import('./daySummary').DaySummary | null }> = new Map();
+  private daySummaryInflight: Set<string> = new Set();
 
   constructor(io: any, options?: { onSubscriptionExpired?: OnSubscriptionExpired }) {
     this.io = io;
@@ -186,6 +191,9 @@ export class CrossoverService {
     );
 
     this.emitStatus(config.symbol, config.timeframe, 'running', 'Monitoring active', config.userId);
+    // Pre-warm the OHLC reference cache so the first alert message already
+    // carries the "Price is above ..." comparison line. Non-blocking.
+    this.refreshDaySummary(config.symbol, config.exchange);
     return { success: true, message: `Monitoring started for ${config.symbol} (${config.timeframe})` };
   }
 
@@ -277,6 +285,10 @@ export class CrossoverService {
    */
   private async pollAndProcess(config: WatchConfig): Promise<void> {
     const watchKey = watchJobKey(config);
+    // Kick off a non-blocking OHLC refresh on every poll. By the time
+    // handleAlerts (the very last step of this method) runs, the cache will
+    // have an up-to-date value to attach to the alert message.
+    this.refreshDaySummary(config.symbol, config.exchange);
     try {
       const priceData = await this.dataSource.fetchTimeframeData(config.symbol, config.timeframe, (config.exchange as 'NSE' | 'NFO' | 'BSE') || 'NSE');
       if (!priceData) {
@@ -317,7 +329,7 @@ export class CrossoverService {
       // Handle alerts (crossover + RSI from same timeframe)
       this.handleAlerts(crossovers, config.userId, config.exchange, priceData.candleData);
       if (rsi.length > 0) {
-        this.handleRsiAlerts(rsi, config.userId);
+        this.handleRsiAlerts(rsi, config.userId, config.exchange);
       }
 
       // Separate RSI timeframe: fetch and process RSI candles independently
@@ -336,7 +348,7 @@ export class CrossoverService {
               config.userId,
             );
             if (rsiAlerts.length > 0) {
-              this.handleRsiAlerts(rsiAlerts, config.userId);
+              this.handleRsiAlerts(rsiAlerts, config.userId, config.exchange);
             }
             this.emitEmaUpdate(config.symbol, config.timeframe, config.userId);
           }
@@ -356,9 +368,49 @@ export class CrossoverService {
    * - Only send **one** alert per symbol + timeframe + EMA pair + direction **per candle timestamp**.
    *   This means late data corrections or repeated polls for the same candle (including 1m candles) will not spam extra emails.
    */
-  private handleAlerts(alerts: CrossoverAlert[], userId?: string, _exchange?: string, candleData?: CandleData[]): void {
+  /**
+   * Cache key includes the IST trading date so the prev-day OHLC we cached
+   * yesterday can't leak into today's alerts. At midnight IST the key
+   * naturally rotates, forcing a fresh fetch on the next poll.
+   */
+  private daySummaryKey(symbol: string, exchange: string): string {
+    const exch = (exchange as 'NSE' | 'NFO' | 'BSE') || 'NSE';
+    return `${symbol.toUpperCase()}:${exch}:${istDateOf()}`;
+  }
+
+  /**
+   * Kick off a non-blocking refresh of the day-summary cache for a symbol.
+   * Skipped entirely if we already have a valid entry for today's trading day.
+   * A pending in-flight refresh for the same key is also deduped. Never
+   * awaited from the poll or alert path.
+   */
+  private refreshDaySummary(symbol: string, exchange: string): void {
+    const key = this.daySummaryKey(symbol, exchange);
+    const cached = this.daySummaryCache.get(key);
+    if (cached?.data) return; // already have valid OHLC for today — reused all day
+    if (this.daySummaryInflight.has(key)) return;
+    this.daySummaryInflight.add(key);
+    const exch = (exchange as 'NSE' | 'NFO' | 'BSE') || 'NSE';
+    fetchDaySummary(symbol, exch)
+      .then((data) => this.daySummaryCache.set(key, { ts: Date.now(), data }))
+      .catch((e) => console.warn(`[ohlc-context] fetch failed for ${symbol} ${exch}:`, e?.message || e))
+      .finally(() => this.daySummaryInflight.delete(key));
+  }
+
+  /**
+   * Synchronous read of the cached day summary keyed by today's trading day.
+   * Returns null if nothing is cached yet — caller then emits the
+   * `OHLC data unavailable` fallback block (never silently drops the section).
+   */
+  private getCachedDaySummary(symbol: string, exchange: string): import('./daySummary').DaySummary | null {
+    const entry = this.daySummaryCache.get(this.daySummaryKey(symbol, exchange));
+    return entry?.data ?? null;
+  }
+
+  private handleAlerts(alerts: CrossoverAlert[], userId?: string, exchange?: string, candleData?: CandleData[]): void {
     const userEmailPromise =
       userId && alerts.length > 0 ? getClerkUserEmail(userId) : Promise.resolve(null);
+
     for (const alert of alerts) {
       const pairKey = [
         userId ?? 'global',
@@ -376,6 +428,23 @@ export class CrossoverService {
       this.lastAlertByPairAndCandle.set(pairKey, alert.timestamp);
 
       addAlert(alert, userId);
+
+      // Synchronously read cached OHLC reference levels (refreshed in the
+      // background by pollSymbol). No wait, no fallback fetch: if the cache
+      // is empty for this symbol, buildOhlcContextBlock returns the
+      // "OHLC data unavailable" string per spec so the block is never
+      // silently dropped from the alert.
+      const cachedDaySummary = this.getCachedDaySummary(alert.symbol, exchange ?? 'NSE');
+      alert.ohlcContext = buildOhlcContextBlock(
+        alert.crossoverType,
+        alert.price,
+        cachedDaySummary,
+        alert.currency,
+      );
+      if (alert.ohlcContext === OHLC_UNAVAILABLE) {
+        console.warn(`[ohlc-context] unavailable at alert time for ${alert.symbol} ${exchange ?? 'NSE'}`);
+      }
+
       // Emit to user-specific room if userId is set, otherwise broadcast
       if (userId && this.io) {
         this.io.to(`user:${userId}`).emit('alert:crossover', alert);
@@ -416,6 +485,7 @@ export class CrossoverService {
             userId,
             emailSentAt: Date.now(),
             candleClosePrice: matchedCandle?.close,
+            daySummary: cachedDaySummary,
           }).catch((e) => console.warn('Alert log append failed:', e));
         })
         .catch((e) => {
@@ -424,6 +494,7 @@ export class CrossoverService {
           appendAlertLog(alert, {
             userId,
             candleClosePrice: matchedCandle?.close,
+            daySummary: cachedDaySummary,
           }).catch((err) => console.warn('Alert log append failed:', err));
         });
     }
@@ -433,7 +504,7 @@ export class CrossoverService {
    * Dispatch RSI alerts: dedupe per candle, broadcast over socket, push, email, log.
    * No DB persistence yet — RSI history will not survive a refresh in this first pass.
    */
-  private handleRsiAlerts(alerts: RsiAlert[], userId?: string): void {
+  private handleRsiAlerts(alerts: RsiAlert[], userId?: string, exchange?: string): void {
     const userEmailPromise =
       userId && alerts.length > 0 ? getClerkUserEmail(userId) : Promise.resolve(null);
 
@@ -449,6 +520,20 @@ export class CrossoverService {
       if (lastTs && lastTs === alert.timestamp) continue;
       this.lastRsiAlertByKey.set(dedupKey, alert.timestamp);
 
+      // Synchronously read cached OHLC reference levels (refreshed in the
+      // background by pollAndProcess). Empty cache → attach the
+      // "OHLC data unavailable" fallback so the block is never dropped.
+      const cachedDaySummary = this.getCachedDaySummary(alert.symbol, exchange ?? 'NSE');
+      alert.ohlcContext = buildOhlcContextBlock(
+        alert.direction,
+        alert.price,
+        cachedDaySummary,
+        alert.currency,
+      );
+      if (alert.ohlcContext === OHLC_UNAVAILABLE) {
+        console.warn(`[ohlc-context] unavailable at alert time for ${alert.symbol} ${exchange ?? 'NSE'}`);
+      }
+
       // Socket broadcast
       if (userId && this.io) {
         this.io.to(`user:${userId}`).emit('alert:rsi', alert);
@@ -459,10 +544,17 @@ export class CrossoverService {
       // Push notification
       this.sendRsiPushNotification(alert, userId);
 
-      // Email + xlsx log (best-effort)
+      // Email
       userEmailPromise
         .then((email) => sendRsiAlertEmail(alert, email))
         .catch((e) => console.warn('RSI email alert failed:', e));
+
+      // xlsx log — best-effort, fire-and-forget, does not block channels above
+      appendRsiAlertLog(alert, {
+        userId,
+        daySummary: cachedDaySummary,
+        ohlcContext: alert.ohlcContext,
+      }).catch((e) => console.warn('RSI alert log append failed:', e));
 
       // Telegram (best-effort, per-user chat id)
       if (userId) {
@@ -555,9 +647,11 @@ export class CrossoverService {
     if (!webpush || this.pushSubscriptions.size === 0) return;
 
     const emoji = alert.crossoverType === 'bullish' ? '📈' : '📉';
+    const base = `EMA(${alert.fastPeriod}) crossed ${alert.crossoverType === 'bullish' ? 'above' : 'below'} EMA(${alert.slowPeriod}) at ₹${alert.price}`;
+    const body = alert.ohlcContext ? `${base}\n${alert.ohlcContext}` : base;
     const payload = JSON.stringify({
       title: `${emoji} ${alert.crossoverType === 'bullish' ? 'Bullish' : 'Bearish'} Crossover: ${alert.symbol}`,
-      body: `EMA(${alert.fastPeriod}) crossed ${alert.crossoverType === 'bullish' ? 'above' : 'below'} EMA(${alert.slowPeriod}) at ₹${alert.price}`,
+      body,
       tag: `crossover-${alert.symbol}-${alert.id}`,
       url: '/',
     });
@@ -596,10 +690,12 @@ export class CrossoverService {
       signalLineCross: 'Signal line cross',
     };
     const label = labelMap[alert.signalType];
+    const base = `RSI(${alert.period}) = ${alert.rsiValue} (${alert.direction}) at ₹${alert.price}`;
+    const body = alert.ohlcContext ? `${base}\n${alert.ohlcContext}` : base;
 
     const payload = JSON.stringify({
       title: `${emoji} RSI ${label}: ${alert.symbol}`,
-      body: `RSI(${alert.period}) = ${alert.rsiValue} (${alert.direction}) at ₹${alert.price}`,
+      body,
       tag: `rsi-${alert.symbol}-${alert.id}`,
       url: '/',
     });

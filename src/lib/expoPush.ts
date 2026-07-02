@@ -96,16 +96,19 @@ export async function pushCrossoverToUser(
     slowPeriod: number;
     price: number;
     id: string;
+    ohlcContext?: string;
   },
 ): Promise<void> {
   const tokens = await getExpoPushTokensForUser(userId);
   if (tokens.length === 0) return;
   const emoji = alert.crossoverType === 'bullish' ? '📈' : '📉';
   const dir = alert.crossoverType === 'bullish' ? 'Bullish' : 'Bearish';
+  const baseBody = `EMA(${alert.fastPeriod}) crossed ${alert.crossoverType === 'bullish' ? 'above' : 'below'} EMA(${alert.slowPeriod}) at ₹${alert.price}`;
+  const body = alert.ohlcContext ? `${baseBody}\n${alert.ohlcContext}` : baseBody;
   const messages: ExpoPushMessage[] = tokens.map((to) => ({
     to,
     title: `${emoji} ${dir} Crossover: ${alert.symbol}`,
-    body: `EMA(${alert.fastPeriod}) crossed ${alert.crossoverType === 'bullish' ? 'above' : 'below'} EMA(${alert.slowPeriod}) at ₹${alert.price}`,
+    body,
     data: { kind: 'crossover', symbol: alert.symbol, id: alert.id },
     channelId: 'alerts',
     priority: 'high',
@@ -126,6 +129,7 @@ export async function pushRsiToUser(
     period: number;
     price: number;
     id: string;
+    ohlcContext?: string;
   },
 ): Promise<void> {
   const tokens = await getExpoPushTokensForUser(userId);
@@ -139,10 +143,12 @@ export async function pushRsiToUser(
     signalLineCross: 'Signal line cross',
   };
   const label = labelMap[alert.signalType] ?? alert.signalType;
+  const baseBody = `RSI(${alert.period}) = ${alert.rsiValue} (${alert.direction}) at ₹${alert.price}`;
+  const body = alert.ohlcContext ? `${baseBody}\n${alert.ohlcContext}` : baseBody;
   const messages: ExpoPushMessage[] = tokens.map((to) => ({
     to,
     title: `${emoji} RSI ${label}: ${alert.symbol}`,
-    body: `RSI(${alert.period}) = ${alert.rsiValue} (${alert.direction}) at ₹${alert.price}`,
+    body,
     data: { kind: 'rsi', symbol: alert.symbol, id: alert.id },
     channelId: 'alerts',
     priority: 'high',

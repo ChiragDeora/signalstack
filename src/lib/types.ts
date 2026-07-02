@@ -68,6 +68,13 @@ export interface RsiAlert {
   currency: string;
   timestamp: string;
   source: string;
+  /**
+   * Multi-line OHLC context block appended to the outgoing alert message.
+   * Same shape/semantics as `CrossoverAlert.ohlcContext` — populated by the
+   * dispatcher just before send. Value is the "OHLC data unavailable" string
+   * when the day-summary cache is empty at alert time.
+   */
+  ohlcContext?: string;
 }
 
 // Crossover alert stored and pushed to clients
@@ -84,6 +91,12 @@ export interface CrossoverAlert {
   currency: string;
   timestamp: string;
   source: string;
+  /**
+   * Optional sentence describing how `price` compares to yesterday O/H/L/C and
+   * today's open. Populated by the alert dispatcher before the alert hits push
+   * / telegram / email so each channel can append the same context line.
+   */
+  ohlcContext?: string;
 }
 
 // RSI configuration per watch. All fields are required when enabled = true —

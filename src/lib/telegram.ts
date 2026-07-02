@@ -5,6 +5,7 @@
  */
 
 import { getSupabaseAdmin } from './supabaseServer';
+import { isMarketOpen } from './marketHours';
 
 const TG_API_BASE = 'https://api.telegram.org';
 
@@ -193,19 +194,28 @@ export async function sendCrossoverTelegramAlert(
     price: number;
     currency: string;
     timestamp: string;
+    ohlcContext?: string;
   },
 ): Promise<void> {
+  if (!isMarketOpen('NSE')) {
+    console.warn(
+      `[market-closed] Telegram crossover alert suppressed: ${alert.symbol} ${alert.crossoverType} @ ${alert.timestamp}`,
+    );
+    return;
+  }
   if (!isTelegramConfigured()) return;
   const chatId = await getUserTelegramChatId(userId);
   if (!chatId) return;
   const emoji = alert.crossoverType === 'bullish' ? '📈' : '📉';
   const dir = alert.crossoverType === 'bullish' ? 'Bullish' : 'Bearish';
   const arrow = alert.crossoverType === 'bullish' ? 'above' : 'below';
+  const ohlcLine = alert.ohlcContext ? `${alert.ohlcContext}\n` : '';
   const text =
     `${emoji} <b>${dir} crossover</b>\n` +
     `<b>${alert.symbol}</b> · ${alert.timeframe}\n` +
     `EMA(${alert.fastPeriod}) crossed ${arrow} EMA(${alert.slowPeriod})\n` +
     `Price: ${alert.currency} ${alert.price}\n` +
+    ohlcLine +
     `<i>${fmtTimeIST(alert.timestamp)}</i>`;
   await sendTelegramMessage({ chatId, text, parseMode: 'HTML' });
 }
@@ -233,19 +243,28 @@ export async function sendRsiTelegramAlert(
     price: number;
     currency: string;
     timestamp: string;
+    ohlcContext?: string;
   },
 ): Promise<void> {
+  if (!isMarketOpen('NSE')) {
+    console.warn(
+      `[market-closed] Telegram RSI alert suppressed: ${alert.symbol} ${alert.signalType} @ ${alert.timestamp}`,
+    );
+    return;
+  }
   if (!isTelegramConfigured()) return;
   const chatId = await getUserTelegramChatId(userId);
   if (!chatId) return;
   const emoji = alert.direction === 'bullish' ? '📈' : '📉';
   const label = RSI_SIGNAL_LABEL[alert.signalType] ?? alert.signalType;
+  const ohlcLine = alert.ohlcContext ? `${alert.ohlcContext}\n` : '';
   const text =
     `${emoji} <b>RSI ${label}</b>\n` +
     `<b>${alert.symbol}</b> · ${alert.timeframe}\n` +
     `RSI(${alert.period}) = <b>${alert.rsiValue.toFixed(2)}</b> (prev ${alert.previousRsi.toFixed(2)})\n` +
     `Direction: ${alert.direction}\n` +
     `Price: ${alert.currency} ${alert.price}\n` +
+    ohlcLine +
     `<i>${fmtTimeIST(alert.timestamp)}</i>`;
   await sendTelegramMessage({ chatId, text, parseMode: 'HTML' });
 }

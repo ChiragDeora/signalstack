@@ -7,6 +7,7 @@
 
 import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
+import { isMarketOpen } from './marketHours';
 
 const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
 
@@ -197,6 +198,173 @@ function formatAlertTimestamp(isoTimestamp: string): string {
   }
 }
 
+// ============================================================================
+// Alert email design system — shared shell + primitives.
+// Rules for cross-client compatibility (Gmail / Outlook / Apple Mail):
+//   • table-based layout, everything inline-styled
+//   • no flexbox, no grid, no web fonts, no dark-mode variants
+//   • max width 600px; single column; graceful degradation on narrow screens
+// ============================================================================
+const ACCENT_BULL = '#10b981';
+const ACCENT_BEAR = '#ef4444';
+const INK = '#0f172a';
+const INK_2 = '#475569';
+const MUTED = '#64748b';
+const BORDER = '#e2e8f0';
+const SURFACE = '#ffffff';
+const SURFACE_2 = '#f6f8fc';
+const CARD_BG = '#fafbfd';
+const FONT_STACK = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif";
+const MONO = "SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace";
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function renderOhlcCallout(ohlcContext: string | undefined): string {
+  if (!ohlcContext) return '';
+  const escaped = escapeHtml(ohlcContext).replace(/\n/g, '<br>');
+  return `
+    <tr>
+      <td style="padding:16px 24px 4px 24px;">
+        <div style="border:1px solid ${BORDER};border-left:3px solid ${INK_2};border-radius:8px;background:${SURFACE_2};padding:12px 14px;">
+          <div style="font-family:${FONT_STACK};font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:${MUTED};margin-bottom:6px;">OHLC context</div>
+          <div style="font-family:${MONO};font-size:13px;color:${INK};line-height:1.55;">${escaped}</div>
+        </div>
+      </td>
+    </tr>`;
+}
+
+/**
+ * Renders the standard alert email shell. `bodyRows` is a string of `<tr>…</tr>`
+ * blocks slotted into the main card between the header and the OHLC callout.
+ */
+function renderAlertEmail(opts: {
+  direction: 'bullish' | 'bearish';
+  emoji: string;
+  eyebrow: string;   // e.g. "Bullish crossover" or "RSI Overbought cross"
+  symbol: string;
+  timeframe: string;
+  bodyRows: string;  // main content rows
+  ohlcContext?: string;
+  timeStr: string;
+}): string {
+  const accent = opts.direction === 'bullish' ? ACCENT_BULL : ACCENT_BEAR;
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light only">
+<title>${escapeHtml(opts.eyebrow)} · ${escapeHtml(opts.symbol)}</title>
+</head>
+<body style="margin:0;padding:0;background:${SURFACE_2};font-family:${FONT_STACK};color:${INK};">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${SURFACE_2};">
+  <tr>
+    <td align="center" style="padding:24px 12px;">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:${SURFACE};border:1px solid ${BORDER};border-radius:14px;overflow:hidden;box-shadow:0 1px 2px rgba(15,23,42,.04);">
+        <tr>
+          <td style="height:4px;background:${accent};line-height:4px;font-size:0;">&nbsp;</td>
+        </tr>
+        <tr>
+          <td style="padding:20px 24px 8px 24px;">
+            <div style="font-size:12px;font-weight:700;color:${accent};letter-spacing:.06em;text-transform:uppercase;">
+              ${opts.emoji} ${escapeHtml(opts.eyebrow)}
+            </div>
+            <div style="margin-top:6px;">
+              <span style="font-size:26px;font-weight:800;color:${INK};letter-spacing:-.01em;">${escapeHtml(opts.symbol)}</span>
+              <span style="display:inline-block;margin-left:8px;padding:3px 8px;border-radius:999px;background:${SURFACE_2};border:1px solid ${BORDER};font-family:${MONO};font-size:11px;font-weight:700;color:${INK_2};vertical-align:middle;">${escapeHtml(opts.timeframe)}</span>
+            </div>
+          </td>
+        </tr>
+        ${opts.bodyRows}
+        ${renderOhlcCallout(opts.ohlcContext)}
+        <tr>
+          <td style="padding:14px 24px 20px 24px;border-top:1px solid ${BORDER};margin-top:8px;">
+            <div style="font-size:11px;color:${MUTED};">
+              ⏱ ${escapeHtml(opts.timeStr)}
+            </div>
+          </td>
+        </tr>
+      </table>
+      <div style="margin-top:12px;font-size:11px;color:${MUTED};font-family:${FONT_STACK};">
+        SignalStack · automated alert · <a href="https://signalstack.app" style="color:${MUTED};text-decoration:underline;">signalstack.app</a>
+      </div>
+    </td>
+  </tr>
+</table>
+</body>
+</html>`;
+}
+
+function renderCrossoverBody(alert: {
+  crossoverType: 'bullish' | 'bearish';
+  fastPeriod: number;
+  slowPeriod: number;
+  price: number;
+  currency: string;
+}): string {
+  const accent = alert.crossoverType === 'bullish' ? ACCENT_BULL : ACCENT_BEAR;
+  const dir = alert.crossoverType === 'bullish' ? 'above' : 'below';
+  const priceLine = `${escapeHtml(alert.currency)} ${alert.price.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return `
+        <tr>
+          <td style="padding:8px 24px 4px 24px;">
+            <div style="font-size:14px;color:${INK_2};line-height:1.5;">
+              EMA(<strong style="color:${INK};">${alert.fastPeriod}</strong>) crossed <strong style="color:${accent};">${dir}</strong> EMA(<strong style="color:${INK};">${alert.slowPeriod}</strong>)
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:12px 24px 8px 24px;">
+            <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:${MUTED};">Price at signal</div>
+            <div style="font-family:${MONO};font-size:28px;font-weight:800;color:${accent};margin-top:4px;">${priceLine}</div>
+          </td>
+        </tr>`;
+}
+
+function renderRsiBody(alert: {
+  signalType: string;
+  direction: 'bullish' | 'bearish';
+  rsiValue: number;
+  previousRsi: number;
+  period: number;
+  overbought: number;
+  oversold: number;
+  price: number;
+  currency: string;
+}, signalLabel: string): string {
+  const accent = alert.direction === 'bullish' ? ACCENT_BULL : ACCENT_BEAR;
+  const priceLine = `${escapeHtml(alert.currency)} ${alert.price.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return `
+        <tr>
+          <td style="padding:8px 24px 4px 24px;">
+            <div style="font-size:14px;color:${INK_2};line-height:1.5;">
+              <strong style="color:${INK};">${escapeHtml(signalLabel)}</strong>
+              <span style="color:${MUTED};">·</span>
+              RSI(<strong style="color:${INK};">${alert.period}</strong>)
+              <span style="color:${MUTED};">=</span>
+              <strong style="color:${accent};font-family:${MONO};">${alert.rsiValue.toFixed(2)}</strong>
+              <span style="color:${MUTED};font-family:${MONO};font-size:12px;">(prev ${alert.previousRsi.toFixed(2)})</span>
+            </div>
+            <div style="font-size:12px;color:${MUTED};margin-top:6px;font-family:${MONO};">
+              overbought ${alert.overbought} / oversold ${alert.oversold}
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:12px 24px 8px 24px;">
+            <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:${MUTED};">Price at signal</div>
+            <div style="font-family:${MONO};font-size:28px;font-weight:800;color:${accent};margin-top:4px;">${priceLine}</div>
+          </td>
+        </tr>`;
+}
+
 /**
  * Send crossover alert emails to BREVO_ALERT_TO and optionally to the signed-in user's email.
  * @param alert - Crossover alert payload
@@ -212,10 +380,17 @@ export async function sendCrossoverAlertEmail(
     price: number;
     currency: string;
     timestamp: string;
+    ohlcContext?: string;
   },
   userEmail?: string | null,
   attachments?: EmailAttachment[],
 ): Promise<void> {
+  if (!isMarketOpen('NSE')) {
+    console.warn(
+      `[market-closed] Email crossover alert suppressed: ${alert.symbol} ${alert.crossoverType} @ ${alert.timestamp}`,
+    );
+    return;
+  }
   const envRecipients = getAlertRecipientEmails();
   const recipients = [...envRecipients];
   if (userEmail && !recipients.includes(userEmail.toLowerCase())) {
@@ -228,18 +403,26 @@ export async function sendCrossoverAlertEmail(
   const emoji = alert.crossoverType === 'bullish' ? '📈' : '📉';
   const direction = alert.crossoverType === 'bullish' ? 'Bullish' : 'Bearish';
   const subject = `${emoji} ${direction} Crossover: ${alert.symbol} (${alert.timeframe})`;
+
+  const ohlcText = alert.ohlcContext ? `\n${alert.ohlcContext}\n` : '';
   const text =
     `${direction} crossover detected.\n` +
-    `Symbol: ${alert.symbol}\n` +
-    `Timeframe: ${alert.timeframe}\n` +
+    `Symbol: ${alert.symbol} · Timeframe: ${alert.timeframe}\n` +
     `EMA(${alert.fastPeriod}) crossed ${alert.crossoverType === 'bullish' ? 'above' : 'below'} EMA(${alert.slowPeriod})\n` +
-    `Price: ${alert.currency} ${alert.price}\n` +
+    `Price at signal: ${alert.currency} ${alert.price}\n` +
+    ohlcText +
     `Time: ${timeStr}`;
-  const html =
-    `<p><strong>${direction} crossover</strong></p>` +
-    `<p>Symbol: <strong>${alert.symbol}</strong> · Timeframe: ${alert.timeframe}</p>` +
-    `<p>EMA(${alert.fastPeriod}) crossed ${alert.crossoverType === 'bullish' ? 'above' : 'below'} EMA(${alert.slowPeriod}) at ${alert.currency} ${alert.price}</p>` +
-    `<p><small>${timeStr}</small></p>`;
+
+  const html = renderAlertEmail({
+    direction: alert.crossoverType,
+    emoji,
+    eyebrow: `${direction} crossover`,
+    symbol: alert.symbol,
+    timeframe: alert.timeframe,
+    bodyRows: renderCrossoverBody(alert),
+    ohlcContext: alert.ohlcContext,
+    timeStr,
+  });
 
   const result = await sendEmail({ to: recipients, subject, text, html, attachments });
   if (!result.ok) console.warn('Brevo crossover alert email failed:', result.error);
@@ -341,9 +524,16 @@ export async function sendRsiAlertEmail(
     price: number;
     currency: string;
     timestamp: string;
+    ohlcContext?: string;
   },
   userEmail?: string | null,
 ): Promise<void> {
+  if (!isMarketOpen('NSE')) {
+    console.warn(
+      `[market-closed] Email RSI alert suppressed: ${alert.symbol} ${alert.signalType} @ ${alert.timestamp}`,
+    );
+    return;
+  }
   const envRecipients = getAlertRecipientEmails();
   const recipients = [...envRecipients];
   if (userEmail && !recipients.includes(userEmail.toLowerCase())) {
@@ -356,21 +546,27 @@ export async function sendRsiAlertEmail(
   const emoji = alert.direction === 'bullish' ? '📈' : '📉';
   const signalLabel = RSI_SIGNAL_LABEL[alert.signalType] ?? alert.signalType;
   const subject = `${emoji} RSI ${signalLabel}: ${alert.symbol} (${alert.timeframe})`;
+
+  const ohlcText = alert.ohlcContext ? `\n${alert.ohlcContext}\n` : '';
   const text =
     `RSI ${signalLabel} (${alert.direction}) detected.\n` +
-    `Symbol: ${alert.symbol}\n` +
-    `Timeframe: ${alert.timeframe}\n` +
+    `Symbol: ${alert.symbol} · Timeframe: ${alert.timeframe}\n` +
     `RSI(${alert.period}) = ${alert.rsiValue.toFixed(2)} (previous ${alert.previousRsi.toFixed(2)})\n` +
     `Thresholds: overbought ${alert.overbought} / oversold ${alert.oversold}\n` +
-    `Price: ${alert.currency} ${alert.price}\n` +
+    `Price at signal: ${alert.currency} ${alert.price}\n` +
+    ohlcText +
     `Time: ${timeStr}`;
-  const html =
-    `<p><strong>RSI ${signalLabel}</strong> (${alert.direction})</p>` +
-    `<p>Symbol: <strong>${alert.symbol}</strong> · Timeframe: ${alert.timeframe}</p>` +
-    `<p>RSI(${alert.period}) = <strong>${alert.rsiValue.toFixed(2)}</strong> (previous ${alert.previousRsi.toFixed(2)})</p>` +
-    `<p>Thresholds — overbought ${alert.overbought}, oversold ${alert.oversold}</p>` +
-    `<p>Price at signal: ${alert.currency} ${alert.price}</p>` +
-    `<p><small>${timeStr}</small></p>`;
+
+  const html = renderAlertEmail({
+    direction: alert.direction,
+    emoji,
+    eyebrow: `RSI ${signalLabel}`,
+    symbol: alert.symbol,
+    timeframe: alert.timeframe,
+    bodyRows: renderRsiBody(alert, signalLabel),
+    ohlcContext: alert.ohlcContext,
+    timeStr,
+  });
 
   const result = await sendEmail({ to: recipients, subject, text, html });
   if (!result.ok) console.warn('Brevo RSI alert email failed:', result.error);
