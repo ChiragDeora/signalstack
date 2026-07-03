@@ -32,39 +32,57 @@ export function istDateOf(ts: number | Date = new Date()): string {
   return `${get('year')}-${get('month')}-${get('day')}`;
 }
 
+/**
+ * Fetch ONLY the previous trading day's OHLC via daily candles. Used by the
+ * pre-market warm-up cron (09:10 IST) — prev-day data is final before open,
+ * so it can be fetched and cached before the market session starts.
+ *
+ * Candle-index resolution: Angel One's ONE_DAY response may or may not
+ * include today's in-progress daily candle. Never assume position — compare
+ * the last candle's IST calendar date against today's.
+ *   • last candle's IST date == today → today's partial is included,
+ *     previous trading day = sorted[-2]
+ *   • else → sorted[-1] IS the previous trading day
+ */
+export async function fetchPrevDayOHLC(
+  symbol: string,
+  exchange: 'NSE' | 'NFO' | 'BSE' = 'NSE',
+  dataSource: UniversalMarketDataSource = new UniversalMarketDataSource(),
+): Promise<DayRange | null> {
+  try {
+    const daily = await dataSource.fetchTimeframeData(symbol, '1d', exchange);
+    if (!daily?.candleData || daily.candleData.length < 1) return null;
+    const sorted = [...daily.candleData].sort((a, b) => a.timestamp - b.timestamp);
+    const todayIST = istDateOf();
+    const lastCandle = sorted[sorted.length - 1];
+    const lastIST = istDateOf(lastCandle.timestamp);
+    let prev = null as typeof lastCandle | null;
+    if (lastIST === todayIST) {
+      if (sorted.length >= 2) prev = sorted[sorted.length - 2];
+    } else {
+      prev = lastCandle;
+    }
+    return prev ? { open: prev.open, high: prev.high, low: prev.low, close: prev.close } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Full day summary: today's OHLC (from LTP) + previous trading day's OHLC.
+ * Pass `knownPrevDay` (from the pre-market warm-up cache) to skip the heavy
+ * daily-candle fetch — then this costs a single cheap LTP call.
+ */
 export async function fetchDaySummary(
   symbol: string,
   exchange: 'NSE' | 'NFO' | 'BSE' = 'NSE',
   dataSource: UniversalMarketDataSource = new UniversalMarketDataSource(),
+  knownPrevDay?: DayRange | null,
 ): Promise<DaySummary | null> {
   const ltp = await dataSource.fetchLTP(symbol, exchange);
   if (!ltp) return null;
 
-  let yesterday: DayRange | null = null;
-  try {
-    const daily = await dataSource.fetchTimeframeData(symbol, '1d', exchange);
-    if (daily?.candleData && daily.candleData.length >= 1) {
-      // Candle-index resolution: Angel One's ONE_DAY response may or may not
-      // include today's in-progress daily candle. Never assume position —
-      // compare the last candle's IST calendar date against today's.
-      //   • last candle's IST date == today → today's partial is included,
-      //     previous trading day = sorted[-2]
-      //   • else → sorted[-1] IS the previous trading day
-      const sorted = [...daily.candleData].sort((a, b) => a.timestamp - b.timestamp);
-      const todayIST = istDateOf();
-      const lastCandle = sorted[sorted.length - 1];
-      const lastIST = istDateOf(lastCandle.timestamp);
-      let prev = null as typeof lastCandle | null;
-      if (lastIST === todayIST) {
-        if (sorted.length >= 2) prev = sorted[sorted.length - 2];
-      } else {
-        prev = lastCandle;
-      }
-      if (prev) yesterday = { open: prev.open, high: prev.high, low: prev.low, close: prev.close };
-    }
-  } catch {
-    /* yesterday data is optional */
-  }
+  const yesterday = knownPrevDay ?? (await fetchPrevDayOHLC(symbol, exchange, dataSource));
 
   return {
     today: { open: ltp.open, high: ltp.high, low: ltp.low, close: ltp.ltp },

@@ -27,7 +27,7 @@ import { getClerkUserEmail } from './clerkUserEmail';
 import { buildCrossoverChartAttachment } from './alertChart';
 import { appendAlertLog, appendRsiAlertLog } from './alertLogger';
 import { getAllWatches } from './watchPersistence';
-import { fetchDaySummary, buildOhlcContextBlock, istDateOf, OHLC_UNAVAILABLE } from './daySummary';
+import { fetchDaySummary, fetchPrevDayOHLC, buildOhlcContextBlock, istDateOf, OHLC_UNAVAILABLE } from './daySummary';
 import { CandleData } from './types';
 
 // web-push is optional — only needed for push notifications (see OpenReplay Web Push guide)
@@ -85,6 +85,14 @@ export class CrossoverService {
   // synchronously — alerts fire immediately, no extra network wait.
   private daySummaryCache: Map<string, { ts: number; data: import('./daySummary').DaySummary | null }> = new Map();
   private daySummaryInflight: Set<string> = new Set();
+  /** Last failed day-summary attempt per key — enforces a retry cooldown so a
+   *  failing symbol can't hammer the shared Angel One request queue every poll. */
+  private daySummaryLastFail: Map<string, number> = new Map();
+  private static readonly DAY_SUMMARY_RETRY_COOLDOWN_MS = 3 * 60 * 1000;
+  /** Prev-day OHLC warmed by the 09:10 IST pre-market cron (same key scheme as
+   *  daySummaryCache). Prev-day data is final before open, so fetching it
+   *  before 09:15 keeps the heavy getCandleData calls out of market hours. */
+  private prevDayCache: Map<string, import('./daySummary').DayRange> = new Map();
 
   constructor(io: any, options?: { onSubscriptionExpired?: OnSubscriptionExpired }) {
     this.io = io;
@@ -285,10 +293,12 @@ export class CrossoverService {
    */
   private async pollAndProcess(config: WatchConfig): Promise<void> {
     const watchKey = watchJobKey(config);
-    // Kick off a non-blocking OHLC refresh on every poll. By the time
-    // handleAlerts (the very last step of this method) runs, the cache will
-    // have an up-to-date value to attach to the alert message.
-    this.refreshDaySummary(config.symbol, config.exchange);
+    // Defer the OHLC cache refresh so its API calls enter the shared Angel One
+    // throttle queue AFTER this poll's own fetches. Calling it synchronously
+    // here queued 2 extra requests ahead of the poll (LTP + 1d candles),
+    // delaying crossover detection — especially at 9:15 when every symbol's
+    // day cache misses at once.
+    setTimeout(() => this.refreshDaySummary(config.symbol, config.exchange), 2000);
     try {
       const priceData = await this.dataSource.fetchTimeframeData(config.symbol, config.timeframe, (config.exchange as 'NSE' | 'NFO' | 'BSE') || 'NSE');
       if (!priceData) {
@@ -389,11 +399,29 @@ export class CrossoverService {
     const cached = this.daySummaryCache.get(key);
     if (cached?.data) return; // already have valid OHLC for today — reused all day
     if (this.daySummaryInflight.has(key)) return;
+    // After a failure, wait out the cooldown before trying again. Retrying on
+    // every poll multiplies Angel One request pressure exactly when it's
+    // already rate-limiting (which is why the fetch failed in the first place).
+    const lastFail = this.daySummaryLastFail.get(key);
+    if (lastFail && Date.now() - lastFail < CrossoverService.DAY_SUMMARY_RETRY_COOLDOWN_MS) return;
     this.daySummaryInflight.add(key);
     const exch = (exchange as 'NSE' | 'NFO' | 'BSE') || 'NSE';
-    fetchDaySummary(symbol, exch)
-      .then((data) => this.daySummaryCache.set(key, { ts: Date.now(), data }))
-      .catch((e) => console.warn(`[ohlc-context] fetch failed for ${symbol} ${exch}:`, e?.message || e))
+    // If the 09:10 pre-market cron already cached prev-day OHLC, this is a
+    // single cheap LTP call (today's open); otherwise the full fetch runs.
+    const warmedPrevDay = this.prevDayCache.get(key) ?? null;
+    fetchDaySummary(symbol, exch, undefined, warmedPrevDay)
+      .then((data) => {
+        if (data) {
+          this.daySummaryCache.set(key, { ts: Date.now(), data });
+          this.daySummaryLastFail.delete(key);
+        } else {
+          this.daySummaryLastFail.set(key, Date.now());
+        }
+      })
+      .catch((e) => {
+        this.daySummaryLastFail.set(key, Date.now());
+        console.warn(`[ohlc-context] fetch failed for ${symbol} ${exch}:`, e?.message || e);
+      })
       .finally(() => this.daySummaryInflight.delete(key));
   }
 
@@ -477,7 +505,7 @@ export class CrossoverService {
       });
       Promise.all([userEmailPromise, chartPromise]).then(([email, chartAttachment]) => {
         const attachments = chartAttachment ? [chartAttachment] : undefined;
-        return sendCrossoverAlertEmail(alert, email, attachments);
+        return sendCrossoverAlertEmail(alert, email, attachments, cachedDaySummary);
       })
         .then(() => {
           // Log to xlsx after the email has been dispatched (best-effort)
@@ -546,7 +574,7 @@ export class CrossoverService {
 
       // Email
       userEmailPromise
-        .then((email) => sendRsiAlertEmail(alert, email))
+        .then((email) => sendRsiAlertEmail(alert, email, cachedDaySummary))
         .catch((e) => console.warn('RSI email alert failed:', e));
 
       // xlsx log — best-effort, fire-and-forget, does not block channels above
@@ -749,6 +777,59 @@ export class CrossoverService {
       }
     }
     return { sent, failed };
+  }
+
+  // =========================
+  // Pre-market OHLC warm-up
+  // =========================
+
+  private preMarketCronJob: cron.ScheduledTask | null = null;
+
+  schedulePreMarketWarmup(): void {
+    if (this.preMarketCronJob) return;
+    // 9:10 AM IST (Mon–Fri) — 5 minutes before NSE open. Prev-day OHLC is
+    // final by then, so we pull it while the Angel One API is idle. During
+    // market hours the OHLC context then needs only one cheap LTP call per
+    // symbol (today's open) instead of the heavy getCandleData fetch.
+    this.preMarketCronJob = cron.schedule('10 9 * * 1-5', () => {
+      console.log('🌅 Pre-market OHLC warm-up: triggered');
+      this.warmUpPrevDayOHLC().catch((e) => console.error('Pre-market warm-up failed:', e));
+    }, { timezone: 'Asia/Kolkata' });
+    console.log('🌅 Pre-market OHLC warm-up scheduled: 9:10 AM IST, Mon–Fri');
+  }
+
+  /**
+   * Fetch and cache prev-day OHLC for every persisted watch. Requests are
+   * staggered 600ms apart so the warm-up never saturates the shared Angel One
+   * throttle. Failures are logged and skipped — the lazy per-poll refresh
+   * remains as fallback for any symbol the warm-up misses.
+   */
+  async warmUpPrevDayOHLC(): Promise<void> {
+    const watches = await getAllWatches();
+    const unique = new Map<string, { symbol: string; exchange: string }>();
+    for (const w of watches) {
+      const exch = (w.exchange as string) || 'NSE';
+      unique.set(`${w.symbol.toUpperCase()}:${exch}`, { symbol: w.symbol, exchange: exch });
+    }
+    if (unique.size === 0) {
+      console.log('🌅 Pre-market warm-up: no active watches');
+      return;
+    }
+    console.log(`🌅 Pre-market warm-up: fetching prev-day OHLC for ${unique.size} symbol(s)`);
+    let ok = 0;
+    for (const { symbol, exchange } of unique.values()) {
+      const key = this.daySummaryKey(symbol, exchange);
+      if (this.prevDayCache.has(key)) { ok++; continue; }
+      const prev = await fetchPrevDayOHLC(symbol, (exchange as 'NSE' | 'NFO' | 'BSE') || 'NSE');
+      if (prev) {
+        this.prevDayCache.set(key, prev);
+        ok++;
+      } else {
+        console.warn(`🌅 Pre-market warm-up: no prev-day data for ${symbol} (${exchange})`);
+      }
+      await new Promise((r) => setTimeout(r, 600));
+    }
+    console.log(`🌅 Pre-market warm-up done: ${ok}/${unique.size} cached`);
   }
 
   // =========================

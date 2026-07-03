@@ -43,6 +43,7 @@ export async function getOrCreateCrossoverService(): Promise<CrossoverService> {
       console.log(`🔔 Restored ${subs.length} push subscription(s)`);
     }
     svc.scheduleEndOfDaySummary();
+    svc.schedulePreMarketWarmup();
     g.__crossoverService = svc;
     return svc;
   })();

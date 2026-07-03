@@ -8,6 +8,7 @@
 import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
 import { isMarketOpen } from './marketHours';
+import type { DaySummary } from './daySummary';
 
 const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
 
@@ -226,16 +227,79 @@ function escapeHtml(s: string): string {
     .replace(/'/g, '&#39;');
 }
 
-function renderOhlcCallout(ohlcContext: string | undefined): string {
-  if (!ohlcContext) return '';
-  const escaped = escapeHtml(ohlcContext).replace(/\n/g, '<br>');
+function fmtNum(v: number): string {
+  return v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/**
+ * Structured day-levels section: prev-day O/H/L/C as labeled stat cells,
+ * today's open with a colored gap chip, and a one-line status badge. Falls
+ * back to a muted single-line note when the summary is missing (fetch failed)
+ * so the section is never silently dropped.
+ */
+function renderDayLevels(
+  daySummary: DaySummary | null | undefined,
+  price: number,
+): string {
+  const y = daySummary?.yesterday;
+  const todayOpen = daySummary?.today?.open;
+  const valid =
+    y && Number.isFinite(y.open) && Number.isFinite(y.high) &&
+    Number.isFinite(y.low) && Number.isFinite(y.close) &&
+    Number.isFinite(todayOpen ?? NaN) && (todayOpen as number) > 0;
+
+  if (!valid) {
+    return `
+    <tr>
+      <td style="padding:14px 24px 4px 24px;">
+        <div style="font-size:12px;color:${MUTED};font-style:italic;">OHLC data unavailable for this alert.</div>
+      </td>
+    </tr>`;
+  }
+
+  const gapPct = ((todayOpen as number) - y.close) / y.close * 100;
+  const gapUp = gapPct >= 0;
+  const gapColor = gapUp ? ACCENT_BULL : ACCENT_BEAR;
+  const gapStr = `${gapUp ? '+' : ''}${gapPct.toFixed(2)}%`;
+
+  let statusTxt: string;
+  let statusColor: string;
+  if (price > y.high) { statusTxt = 'Above prev day high'; statusColor = ACCENT_BULL; }
+  else if (price < y.low) { statusTxt = 'Below prev day low'; statusColor = ACCENT_BEAR; }
+  else if (price > y.close) { statusTxt = 'Above prev day close'; statusColor = ACCENT_BULL; }
+  else if (price < y.close) { statusTxt = 'Below prev day close'; statusColor = ACCENT_BEAR; }
+  else { statusTxt = 'At prev day close'; statusColor = INK_2; }
+
+  const cell = (label: string, value: number) => `
+    <td width="25%" style="padding:8px 6px;text-align:center;background:${SURFACE_2};border:1px solid ${BORDER};">
+      <div style="font-size:10px;font-weight:700;color:${MUTED};letter-spacing:.05em;">${label}</div>
+      <div style="font-family:${MONO};font-size:13px;font-weight:700;color:${INK};margin-top:2px;">${fmtNum(value)}</div>
+    </td>`;
+
   return `
     <tr>
       <td style="padding:16px 24px 4px 24px;">
-        <div style="border:1px solid ${BORDER};border-left:3px solid ${INK_2};border-radius:8px;background:${SURFACE_2};padding:12px 14px;">
-          <div style="font-family:${FONT_STACK};font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:${MUTED};margin-bottom:6px;">OHLC context</div>
-          <div style="font-family:${MONO};font-size:13px;color:${INK};line-height:1.55;">${escaped}</div>
-        </div>
+        <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:${MUTED};margin-bottom:8px;">Previous day</div>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:separate;border-spacing:4px 0;">
+          <tr>
+            ${cell('OPEN', y.open)}
+            ${cell('HIGH', y.high)}
+            ${cell('LOW', y.low)}
+            ${cell('CLOSE', y.close)}
+          </tr>
+        </table>
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px;">
+          <tr>
+            <td style="font-size:12.5px;color:${INK_2};">
+              Today open&nbsp;
+              <span style="font-family:${MONO};font-weight:700;color:${INK};">${fmtNum(todayOpen as number)}</span>
+              &nbsp;<span style="display:inline-block;padding:2px 8px;border-radius:999px;font-family:${MONO};font-size:11px;font-weight:700;color:#ffffff;background:${gapColor};">${gapStr}</span>
+            </td>
+            <td align="right" style="font-size:12.5px;font-weight:700;color:${statusColor};white-space:nowrap;">
+              ● ${statusTxt}
+            </td>
+          </tr>
+        </table>
       </td>
     </tr>`;
 }
@@ -246,15 +310,21 @@ function renderOhlcCallout(ohlcContext: string | undefined): string {
  */
 function renderAlertEmail(opts: {
   direction: 'bullish' | 'bearish';
-  emoji: string;
   eyebrow: string;   // e.g. "Bullish crossover" or "RSI Overbought cross"
   symbol: string;
   timeframe: string;
   bodyRows: string;  // main content rows
-  ohlcContext?: string;
+  daySummary?: DaySummary | null;
+  price: number;
   timeStr: string;
 }): string {
   const accent = opts.direction === 'bullish' ? ACCENT_BULL : ACCENT_BEAR;
+  // Gradient top stripe. Solid `background` first as fallback for Outlook
+  // desktop (Word engine ignores linear-gradient and uses the solid color).
+  const stripeGradient =
+    opts.direction === 'bullish'
+      ? 'linear-gradient(90deg,#10b981,#0bb5d6)'
+      : 'linear-gradient(90deg,#ef4444,#f59e0b)';
   return `<!doctype html>
 <html>
 <head>
@@ -269,12 +339,12 @@ function renderAlertEmail(opts: {
     <td align="center" style="padding:24px 12px;">
       <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:${SURFACE};border:1px solid ${BORDER};border-radius:14px;overflow:hidden;box-shadow:0 1px 2px rgba(15,23,42,.04);">
         <tr>
-          <td style="height:4px;background:${accent};line-height:4px;font-size:0;">&nbsp;</td>
+          <td style="height:4px;background:${accent};background:${stripeGradient};line-height:4px;font-size:0;">&nbsp;</td>
         </tr>
         <tr>
           <td style="padding:20px 24px 8px 24px;">
-            <div style="font-size:12px;font-weight:700;color:${accent};letter-spacing:.06em;text-transform:uppercase;">
-              ${opts.emoji} ${escapeHtml(opts.eyebrow)}
+            <div style="font-size:11.5px;font-weight:700;color:${accent};letter-spacing:.08em;text-transform:uppercase;">
+              ${escapeHtml(opts.eyebrow)}
             </div>
             <div style="margin-top:6px;">
               <span style="font-size:26px;font-weight:800;color:${INK};letter-spacing:-.01em;">${escapeHtml(opts.symbol)}</span>
@@ -283,18 +353,18 @@ function renderAlertEmail(opts: {
           </td>
         </tr>
         ${opts.bodyRows}
-        ${renderOhlcCallout(opts.ohlcContext)}
+        ${renderDayLevels(opts.daySummary, opts.price)}
         <tr>
-          <td style="padding:14px 24px 20px 24px;border-top:1px solid ${BORDER};margin-top:8px;">
-            <div style="font-size:11px;color:${MUTED};">
-              ⏱ ${escapeHtml(opts.timeStr)}
-            </div>
+          <td style="padding:16px 24px 18px 24px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid ${BORDER};">
+              <tr>
+                <td style="padding-top:12px;font-size:11px;color:${MUTED};">${escapeHtml(opts.timeStr)}</td>
+                <td align="right" style="padding-top:12px;font-size:11px;color:${MUTED};">SignalStack</td>
+              </tr>
+            </table>
           </td>
         </tr>
       </table>
-      <div style="margin-top:12px;font-size:11px;color:${MUTED};font-family:${FONT_STACK};">
-        SignalStack · automated alert · <a href="https://signalstack.app" style="color:${MUTED};text-decoration:underline;">signalstack.app</a>
-      </div>
     </td>
   </tr>
 </table>
@@ -323,7 +393,7 @@ function renderCrossoverBody(alert: {
         <tr>
           <td style="padding:12px 24px 8px 24px;">
             <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:${MUTED};">Price at signal</div>
-            <div style="font-family:${MONO};font-size:28px;font-weight:800;color:${accent};margin-top:4px;">${priceLine}</div>
+            <div style="font-family:${MONO};font-size:22px;font-weight:800;color:${accent};margin-top:4px;">${priceLine}</div>
           </td>
         </tr>`;
 }
@@ -360,7 +430,7 @@ function renderRsiBody(alert: {
         <tr>
           <td style="padding:12px 24px 8px 24px;">
             <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:${MUTED};">Price at signal</div>
-            <div style="font-family:${MONO};font-size:28px;font-weight:800;color:${accent};margin-top:4px;">${priceLine}</div>
+            <div style="font-family:${MONO};font-size:22px;font-weight:800;color:${accent};margin-top:4px;">${priceLine}</div>
           </td>
         </tr>`;
 }
@@ -384,6 +454,7 @@ export async function sendCrossoverAlertEmail(
   },
   userEmail?: string | null,
   attachments?: EmailAttachment[],
+  daySummary?: DaySummary | null,
 ): Promise<void> {
   if (!isMarketOpen('NSE')) {
     console.warn(
@@ -415,12 +486,12 @@ export async function sendCrossoverAlertEmail(
 
   const html = renderAlertEmail({
     direction: alert.crossoverType,
-    emoji,
     eyebrow: `${direction} crossover`,
     symbol: alert.symbol,
     timeframe: alert.timeframe,
     bodyRows: renderCrossoverBody(alert),
-    ohlcContext: alert.ohlcContext,
+    daySummary,
+    price: alert.price,
     timeStr,
   });
 
@@ -527,6 +598,7 @@ export async function sendRsiAlertEmail(
     ohlcContext?: string;
   },
   userEmail?: string | null,
+  daySummary?: DaySummary | null,
 ): Promise<void> {
   if (!isMarketOpen('NSE')) {
     console.warn(
@@ -559,12 +631,12 @@ export async function sendRsiAlertEmail(
 
   const html = renderAlertEmail({
     direction: alert.direction,
-    emoji,
     eyebrow: `RSI ${signalLabel}`,
     symbol: alert.symbol,
     timeframe: alert.timeframe,
     bodyRows: renderRsiBody(alert, signalLabel),
-    ohlcContext: alert.ohlcContext,
+    daySummary,
+    price: alert.price,
     timeStr,
   });
 
