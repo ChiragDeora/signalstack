@@ -507,6 +507,33 @@ export class AngelOneDataSource {
     }
   }
 
+  /**
+   * Resolve an INDEX symbol (NIFTY 50, BANKNIFTY, SENSEX, …) via the scrip
+   * master's AMXIDX rows. Indices are not tradable scrips, so Angel's
+   * searchScrip API returns junk (ETFs/futures) for them — but getCandleData
+   * and getLtpData fully support index tokens (Angel's own charts use them).
+   *
+   * Exact match only, against the row's symbol ("Nifty 50") or name ("NIFTY",
+   * "BANKNIFTY") — so equity symbols like RELIANCE can never collide.
+   * Must be tried BEFORE searchScrip so index queries never mis-resolve.
+   */
+  private async resolveIndexFromScripMaster(symbol: string, exchange: 'NSE' | 'BSE'): Promise<{ symboltoken: string; tradingsymbol: string } | null> {
+    const clean = symbol.toUpperCase().replace(/\.(NS|BO)$/i, '').trim();
+    try {
+      const cache = await this.ensureScripMaster();
+      const row = cache.find((r) =>
+        (r.exch_seg || '') === exchange &&
+        (r.instrumenttype || '') === 'AMXIDX' &&
+        ((r.symbol || '').toUpperCase() === clean || (r.name || '').toUpperCase() === clean),
+      );
+      if (!row?.token || !row?.symbol) return null;
+      console.log('[angelOne.resolveIndex]', clean, 'resolved as index', exchange + ':', row.symbol, 'token', row.token);
+      return { symboltoken: String(row.token), tradingsymbol: row.symbol };
+    } catch {
+      return null;
+    }
+  }
+
   /** Resolve symbol from public scrip master when searchScrip API fails. Supports NSE, NFO, BSE. */
   private async resolveSymbolFromScripMaster(symbol: string, exchange: 'NSE' | 'NFO' | 'BSE' = 'NSE'): Promise<{ symboltoken: string; tradingsymbol: string } | null> {
     const clean = symbol.toUpperCase().replace(/\.(NS|BO)$/i, '').trim();
@@ -539,6 +566,9 @@ export class AngelOneDataSource {
 
   /** Resolve symbol (e.g. RELIANCE or RELIANCE.NS) to NSE symboltoken for equity */
   async resolveSymbol(symbol: string): Promise<{ symboltoken: string; tradingsymbol: string } | null> {
+    // Indices first — searchScrip returns junk for them (see resolveIndexFromScripMaster).
+    const index = await this.resolveIndexFromScripMaster(symbol, 'NSE');
+    if (index) return index;
     await this.ensureSession();
     const clean = symbol.toUpperCase().replace(/\.(NS|BO)$/i, '').trim();
     try {
@@ -580,6 +610,9 @@ export class AngelOneDataSource {
 
   /** Resolve symbol to BSE symboltoken for equity (e.g. RELIANCE or RELIANCE.BO). Falls back to scrip master when searchScrip fails. */
   async resolveSymbolBSE(symbol: string): Promise<{ symboltoken: string; tradingsymbol: string } | null> {
+    // Indices first (SENSEX etc.) — searchScrip returns junk for them.
+    const index = await this.resolveIndexFromScripMaster(symbol, 'BSE');
+    if (index) return index;
     await this.ensureSession();
     const clean = symbol.toUpperCase().replace(/\.(NS|BO)$/i, '').trim();
     try {
