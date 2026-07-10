@@ -4,6 +4,7 @@
  * end-of-day summary email.
  */
 import { UniversalMarketDataSource } from './dynamicMarketSource';
+import type { CandleData } from './types';
 
 export interface DayRange {
   open: number;
@@ -15,6 +16,57 @@ export interface DayRange {
 export interface DaySummary {
   today: DayRange;
   yesterday: DayRange | null;
+}
+
+/** Aggregate a group of intraday candles into a single O/H/L/C session range. */
+function aggregate(candles: CandleData[]): DayRange | null {
+  if (candles.length === 0) return null;
+  const sorted = [...candles].sort((a, b) => a.timestamp - b.timestamp);
+  return {
+    open: sorted[0].open,
+    high: Math.max(...sorted.map((c) => c.high)),
+    low: Math.min(...sorted.map((c) => c.low)),
+    close: sorted[sorted.length - 1].close,
+  };
+}
+
+/**
+ * Derive the full day summary (today's OHLC + previous trading day's OHLC)
+ * from intraday candles the poll ALREADY fetched — zero extra API calls.
+ *
+ * Every poll fetches ~500 candles; for a 5m/15m/… timeframe that window spans
+ * several trading days, so yesterday's full session and today's open are both
+ * present. This keeps OHLC context completely off the market-open critical
+ * path (no separate LTP / daily-candle fetch competing in the API throttle).
+ *
+ * Returns null when the candle window doesn't reach a prior trading day (e.g.
+ * a 1m watch whose 500-candle window only covers ~1 day) — caller then falls
+ * back to the pre-market cron's cached prev-day, or emits "unavailable".
+ */
+export function deriveDaySummaryFromCandles(candles: CandleData[]): DaySummary | null {
+  if (!candles || candles.length === 0) return null;
+  const todayISO = istDateOf();
+
+  // Bucket candles by IST calendar day.
+  const byDay = new Map<string, CandleData[]>();
+  for (const c of candles) {
+    if (!(c.close > 0)) continue;
+    const d = istDateOf(c.timestamp);
+    const arr = byDay.get(d);
+    if (arr) arr.push(c); else byDay.set(d, [c]);
+  }
+
+  const today = aggregate(byDay.get(todayISO) ?? []);
+
+  // Previous trading day = the most recent bucketed day strictly before today.
+  const prevDay = [...byDay.keys()].filter((d) => d < todayISO).sort().pop();
+  const yesterday = prevDay ? aggregate(byDay.get(prevDay) ?? []) : null;
+
+  // Need at least today's open to be useful; if there are no candles for today
+  // yet (very first bar of the session not returned by the API), signal that
+  // the caller should fall back rather than emitting a bogus block.
+  if (!today) return null;
+  return { today, yesterday };
 }
 
 const IST_DATE_FMT = new Intl.DateTimeFormat('en-CA', {
@@ -138,24 +190,47 @@ export function buildOhlcContextBlock(
   const gapStr = `${gapPct >= 0 ? '+' : ''}${gapPct.toFixed(2)}%`;
   const todayLine = `Today open: ${n(todayOpen as number)} (${gapWord} ${gapStr})`;
 
-  // Single most significant fact vs prev day range. Same ordering for both
-  // directions so the message reflects the actual price position, not a
-  // direction bias.
-  let statusLine: string;
-  if (Number.isFinite(price) && price > y.high) {
-    statusLine = 'Price above prev day high ✅';
-  } else if (Number.isFinite(price) && price < y.low) {
-    statusLine = 'Price below prev day low ❌';
-  } else if (Number.isFinite(price) && price > y.close) {
-    statusLine = 'Price above prev day close';
-  } else if (Number.isFinite(price) && price < y.close) {
-    statusLine = 'Price below prev day close';
-  } else {
-    statusLine = 'Price within prev day range';
-  }
-  void direction; // direction reserved for future asymmetric layouts
+  // Reference context only. The "price vs prev-day level" status is no longer
+  // restated on every alert — a level cross is delivered once, as its own
+  // alert, the moment it happens (see detectLevelCrosses / handleLevelCrosses).
+  void direction; void price;
+  return `${prevLine}\n${todayLine}`;
+}
 
-  return `${prevLine}\n${todayLine}\n${statusLine}`;
+/** The three prev-day reference levels a price can cross. */
+export type PrevDayLevel = 'high' | 'low' | 'close';
+
+export interface LevelCross {
+  level: PrevDayLevel;
+  levelValue: number;
+  direction: 'above' | 'below';
+}
+
+/**
+ * Detect which prev-day levels the price crossed between two consecutive
+ * closed candles. `prevClose` = the earlier candle's close, `curClose` = the
+ * just-closed candle's close. A level counts as crossed only when the two
+ * closes straddle it — so it fires exactly once, on the candle where the break
+ * happened, not on every later candle that stays beyond it.
+ */
+export function detectLevelCrosses(
+  prevClose: number,
+  curClose: number,
+  yesterday: DayRange | null,
+): LevelCross[] {
+  if (!yesterday || !Number.isFinite(prevClose) || !Number.isFinite(curClose)) return [];
+  const levels: Array<{ level: PrevDayLevel; value: number }> = [
+    { level: 'high', value: yesterday.high },
+    { level: 'low', value: yesterday.low },
+    { level: 'close', value: yesterday.close },
+  ];
+  const out: LevelCross[] = [];
+  for (const { level, value } of levels) {
+    if (!Number.isFinite(value)) continue;
+    if (prevClose < value && curClose >= value) out.push({ level, levelValue: value, direction: 'above' });
+    else if (prevClose > value && curClose <= value) out.push({ level, levelValue: value, direction: 'below' });
+  }
+  return out;
 }
 
 /**

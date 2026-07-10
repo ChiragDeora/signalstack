@@ -268,3 +268,42 @@ export async function sendRsiTelegramAlert(
     `<i>${fmtTimeIST(alert.timestamp)}</i>`;
   await sendTelegramMessage({ chatId, text, parseMode: 'HTML' });
 }
+
+const LEVEL_LABEL: Record<'high' | 'low' | 'close', string> = {
+  high: 'prev day high',
+  low: 'prev day low',
+  close: 'prev day close',
+};
+
+export async function sendLevelCrossTelegramAlert(
+  userId: string,
+  alert: {
+    symbol: string;
+    timeframe: string;
+    level: 'high' | 'low' | 'close';
+    crossDirection: 'above' | 'below';
+    levelValue: number;
+    price: number;
+    currency: string;
+    timestamp: string;
+  },
+): Promise<void> {
+  if (!isMarketOpen('NSE')) {
+    console.warn(
+      `[market-closed] Telegram level-cross alert suppressed: ${alert.symbol} ${alert.crossDirection} ${alert.level} @ ${alert.timestamp}`,
+    );
+    return;
+  }
+  if (!isTelegramConfigured()) return;
+  const chatId = await getUserTelegramChatId(userId);
+  if (!chatId) return;
+  const emoji = alert.crossDirection === 'above' ? '⬆️' : '⬇️';
+  const label = LEVEL_LABEL[alert.level];
+  const text =
+    `${emoji} <b>Crossed ${alert.crossDirection} ${label}</b>\n` +
+    `<b>${alert.symbol}</b> · ${alert.timeframe}\n` +
+    `Level: ${alert.currency} ${alert.levelValue}\n` +
+    `Price: ${alert.currency} ${alert.price}\n` +
+    `<i>${fmtTimeIST(alert.timestamp)}</i>`;
+  await sendTelegramMessage({ chatId, text, parseMode: 'HTML' });
+}

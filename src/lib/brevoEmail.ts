@@ -643,3 +643,86 @@ export async function sendRsiAlertEmail(
   const result = await sendEmail({ to: recipients, subject, text, html });
   if (!result.ok) console.warn('Brevo RSI alert email failed:', result.error);
 }
+
+const LEVEL_LABEL_EMAIL: Record<'high' | 'low' | 'close', string> = {
+  high: 'prev day high',
+  low: 'prev day low',
+  close: 'prev day close',
+};
+
+/** Prev-day level-cross email — fired once when price crosses a prev-day level. */
+export async function sendLevelCrossAlertEmail(
+  alert: {
+    symbol: string;
+    timeframe: string;
+    level: 'high' | 'low' | 'close';
+    crossDirection: 'above' | 'below';
+    levelValue: number;
+    price: number;
+    currency: string;
+    timestamp: string;
+  },
+  userEmail?: string | null,
+  daySummary?: DaySummary | null,
+): Promise<void> {
+  if (!isMarketOpen('NSE')) {
+    console.warn(
+      `[market-closed] Email level-cross alert suppressed: ${alert.symbol} ${alert.crossDirection} ${alert.level} @ ${alert.timestamp}`,
+    );
+    return;
+  }
+  const envRecipients = getAlertRecipientEmails();
+  const recipients = [...envRecipients];
+  if (userEmail && !recipients.includes(userEmail.toLowerCase())) {
+    recipients.push(userEmail.toLowerCase());
+  }
+  if (recipients.length === 0) return;
+  if (!isBrevoConfigured()) return;
+
+  const timeStr = formatAlertTimestamp(alert.timestamp);
+  const label = LEVEL_LABEL_EMAIL[alert.level];
+  const dir = alert.crossDirection === 'above' ? 'bullish' : 'bearish';
+  const arrow = alert.crossDirection === 'above' ? '⬆️' : '⬇️';
+  const subject = `${arrow} ${alert.symbol}: crossed ${alert.crossDirection} ${label} (${alert.timeframe})`;
+  const accent = dir === 'bullish' ? ACCENT_BULL : ACCENT_BEAR;
+  const priceLine = `${alert.currency} ${alert.price.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const levelStr = `${alert.currency} ${alert.levelValue.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+  const text =
+    `${alert.symbol} crossed ${alert.crossDirection} ${label}.\n` +
+    `Symbol: ${alert.symbol} · Timeframe: ${alert.timeframe}\n` +
+    `Level (${label}): ${levelStr}\n` +
+    `Price: ${priceLine}\n` +
+    `Time: ${timeStr}`;
+
+  const bodyRows = `
+        <tr>
+          <td style="padding:8px 24px 4px 24px;">
+            <div style="font-size:14px;color:${INK_2};line-height:1.5;">
+              Crossed <strong style="color:${accent};">${alert.crossDirection}</strong> ${escapeHtml(label)}
+              <span style="color:${MUTED};">·</span>
+              <span style="font-family:${MONO};color:${INK};">${levelStr}</span>
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:12px 24px 8px 24px;">
+            <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:${MUTED};">Price</div>
+            <div style="font-family:${MONO};font-size:22px;font-weight:800;color:${accent};margin-top:4px;">${priceLine}</div>
+          </td>
+        </tr>`;
+
+  const html = renderAlertEmail({
+    direction: dir,
+    eyebrow: `Crossed ${alert.crossDirection} ${label}`,
+    symbol: alert.symbol,
+    timeframe: alert.timeframe,
+    bodyRows,
+    daySummary,
+    price: alert.price,
+    timeStr,
+  });
+
+  const result = await sendEmail({ to: recipients, subject, text, html });
+  if (!result.ok) console.warn('Brevo level-cross alert email failed:', result.error);
+}

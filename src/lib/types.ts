@@ -99,6 +99,22 @@ export interface CrossoverAlert {
   ohlcContext?: string;
 }
 
+// Prev-day level-cross alert — fired once when price crosses a prev-day
+// reference level (high / low / close), independent of EMA/RSI signals.
+export interface LevelCrossAlert {
+  id: string;
+  type: 'levelCross';
+  symbol: string;
+  timeframe: string;
+  level: 'high' | 'low' | 'close';
+  crossDirection: 'above' | 'below';
+  levelValue: number;
+  price: number;
+  currency: string;
+  timestamp: string;
+  source: string;
+}
+
 // RSI configuration per watch. All fields are required when enabled = true —
 // the UI forces the user to supply them (no implicit defaults).
 export interface RsiConfig {

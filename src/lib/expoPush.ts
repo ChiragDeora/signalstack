@@ -157,3 +157,31 @@ export async function pushRsiToUser(
   const { invalidTokens } = await sendExpoPush(messages);
   for (const t of invalidTokens) await removeExpoPushToken(t);
 }
+
+export async function pushLevelCrossToUser(
+  userId: string,
+  alert: {
+    symbol: string;
+    timeframe: string;
+    level: 'high' | 'low' | 'close';
+    crossDirection: 'above' | 'below';
+    levelValue: number;
+    price: number;
+    id: string;
+  },
+): Promise<void> {
+  const tokens = await getExpoPushTokensForUser(userId);
+  if (tokens.length === 0) return;
+  const emoji = alert.crossDirection === 'above' ? '⬆️' : '⬇️';
+  const messages: ExpoPushMessage[] = tokens.map((to) => ({
+    to,
+    title: `${emoji} ${alert.symbol}: crossed ${alert.crossDirection} prev day ${alert.level}`,
+    body: `Level ₹${alert.levelValue} · price ₹${alert.price} (${alert.timeframe})`,
+    data: { kind: 'levelCross', symbol: alert.symbol, id: alert.id },
+    channelId: 'alerts',
+    priority: 'high',
+    sound: 'default',
+  }));
+  const { invalidTokens } = await sendExpoPush(messages);
+  for (const t of invalidTokens) await removeExpoPushToken(t);
+}

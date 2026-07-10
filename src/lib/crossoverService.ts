@@ -10,24 +10,26 @@ import { EMAEngine } from './emaEngine';
 import { UniversalMarketDataSource } from './dynamicMarketSource';
 import { addAlert, getAlerts } from './alertStore';
 import {
-  WatchConfig, CrossoverAlert, RsiAlert, PriceUpdate, EmaUpdate,
+  WatchConfig, CrossoverAlert, RsiAlert, LevelCrossAlert, PriceUpdate, EmaUpdate,
   MonitorStatus, PushSubscriptionData,
 } from './types';
 import {
   sendCrossoverAlertEmail,
   sendRsiAlertEmail,
+  sendLevelCrossAlertEmail,
   sendEndOfDaySummaryEmail,
   isBrevoConfigured,
   getAlertRecipientEmails,
   type DaySummaryItem,
 } from './brevoEmail';
-import { sendCrossoverTelegramAlert, sendRsiTelegramAlert } from './telegram';
-import { pushCrossoverToUser, pushRsiToUser } from './expoPush';
+import { sendCrossoverTelegramAlert, sendRsiTelegramAlert, sendLevelCrossTelegramAlert } from './telegram';
+import { pushCrossoverToUser, pushRsiToUser, pushLevelCrossToUser } from './expoPush';
 import { getClerkUserEmail } from './clerkUserEmail';
 import { buildCrossoverChartAttachment } from './alertChart';
 import { appendAlertLog, appendRsiAlertLog } from './alertLogger';
 import { getAllWatches } from './watchPersistence';
-import { fetchDaySummary, fetchPrevDayOHLC, buildOhlcContextBlock, istDateOf, OHLC_UNAVAILABLE } from './daySummary';
+import { fetchDaySummary, fetchPrevDayOHLC, deriveDaySummaryFromCandles, detectLevelCrosses, buildOhlcContextBlock, istDateOf, OHLC_UNAVAILABLE } from './daySummary';
+import { randomUUID } from 'crypto';
 import { CandleData } from './types';
 
 // web-push is optional — only needed for push notifications (see OpenReplay Web Push guide)
@@ -49,6 +51,16 @@ try {
 
 const REAL_TIME_POLL_MS = 30_000;
 const MAX_WATCHES_PER_USER = 100;
+
+// Local copy (emaEngine keeps its own private one) — used to decide which
+// candles are closed when checking prev-day level crosses.
+function timeframeToMs(timeframe: string): number {
+  const map: Record<string, number> = {
+    '1m': 60_000, '5m': 5 * 60_000, '15m': 15 * 60_000, '30m': 30 * 60_000,
+    '1h': 60 * 60_000, '4h': 4 * 60 * 60_000, '1d': 24 * 60 * 60_000,
+  };
+  return map[timeframe] || 5 * 60_000;
+}
 
 function watchJobKey(config: WatchConfig): string {
   const sym = config.symbol.toUpperCase();
@@ -81,18 +93,16 @@ export class CrossoverService {
   /** Consecutive null/empty-data poll responses per watch — used only for periodic warning logs. */
   private nullPollStreak: Map<string, number> = new Map();
   // Cache of latest day summary (yesterday OHLC + today's open) per symbol+exchange.
-  // Refreshed in the background by pollSymbol so handleAlerts can read it
-  // synchronously — alerts fire immediately, no extra network wait.
+  // Populated each poll by updateDaySummaryFromCandles (derived from the poll's
+  // own candles — no network) so handleAlerts can read it synchronously.
   private daySummaryCache: Map<string, { ts: number; data: import('./daySummary').DaySummary | null }> = new Map();
-  private daySummaryInflight: Set<string> = new Set();
-  /** Last failed day-summary attempt per key — enforces a retry cooldown so a
-   *  failing symbol can't hammer the shared Angel One request queue every poll. */
-  private daySummaryLastFail: Map<string, number> = new Map();
-  private static readonly DAY_SUMMARY_RETRY_COOLDOWN_MS = 3 * 60 * 1000;
   /** Prev-day OHLC warmed by the 09:10 IST pre-market cron (same key scheme as
    *  daySummaryCache). Prev-day data is final before open, so fetching it
    *  before 09:15 keeps the heavy getCandleData calls out of market hours. */
   private prevDayCache: Map<string, import('./daySummary').DayRange> = new Map();
+  /** Last closed-candle timestamp we've already evaluated for prev-day level
+   *  crosses, per watch key — so each candle is checked once (fire-once). */
+  private lastLevelCandleTs: Map<string, number> = new Map();
 
   constructor(io: any, options?: { onSubscriptionExpired?: OnSubscriptionExpired }) {
     this.io = io;
@@ -199,9 +209,8 @@ export class CrossoverService {
     );
 
     this.emitStatus(config.symbol, config.timeframe, 'running', 'Monitoring active', config.userId);
-    // Pre-warm the OHLC reference cache so the first alert message already
-    // carries the "Price is above ..." comparison line. Non-blocking.
-    this.refreshDaySummary(config.symbol, config.exchange);
+    // OHLC context is derived from each poll's own candle data
+    // (updateDaySummaryFromCandles) — no pre-warm fetch needed here.
     return { success: true, message: `Monitoring started for ${config.symbol} (${config.timeframe})` };
   }
 
@@ -293,12 +302,6 @@ export class CrossoverService {
    */
   private async pollAndProcess(config: WatchConfig): Promise<void> {
     const watchKey = watchJobKey(config);
-    // Defer the OHLC cache refresh so its API calls enter the shared Angel One
-    // throttle queue AFTER this poll's own fetches. Calling it synchronously
-    // here queued 2 extra requests ahead of the poll (LTP + 1d candles),
-    // delaying crossover detection — especially at 9:15 when every symbol's
-    // day cache misses at once.
-    setTimeout(() => this.refreshDaySummary(config.symbol, config.exchange), 2000);
     try {
       const priceData = await this.dataSource.fetchTimeframeData(config.symbol, config.timeframe, (config.exchange as 'NSE' | 'NFO' | 'BSE') || 'NSE');
       if (!priceData) {
@@ -317,6 +320,11 @@ export class CrossoverService {
       }
       // Got data — reset the streak
       this.nullPollStreak.delete(watchKey);
+
+      // OHLC context: derive from the candles we just fetched — ZERO extra API
+      // calls, so it never competes with poll fetches in the Angel throttle
+      // (that competition was delaying crossover detection at market open).
+      this.updateDaySummaryFromCandles(config.symbol, config.exchange, priceData.candleData ?? []);
 
       // Emit price update for UI display
       this.emitPriceUpdate(config.symbol, config.timeframe, priceData, config.userId);
@@ -341,6 +349,10 @@ export class CrossoverService {
       if (rsi.length > 0) {
         this.handleRsiAlerts(rsi, config.userId, config.exchange);
       }
+
+      // Prev-day level crosses — independent of EMA/RSI, fired once per cross.
+      // Uses candles already fetched; no extra API call.
+      this.handleLevelCrosses(config, priceData.candleData || []);
 
       // Separate RSI timeframe: fetch and process RSI candles independently
       const rsiTf = config.rsi?.timeframe;
@@ -389,40 +401,25 @@ export class CrossoverService {
   }
 
   /**
-   * Kick off a non-blocking refresh of the day-summary cache for a symbol.
-   * Skipped entirely if we already have a valid entry for today's trading day.
-   * A pending in-flight refresh for the same key is also deduped. Never
-   * awaited from the poll or alert path.
+   * Update the day-summary cache from candles the poll ALREADY fetched — no
+   * network call. For 5m/15m/… the ~500-candle window spans several trading
+   * days, so today's open + yesterday's session are derivable directly. For
+   * short windows (1m) that don't reach yesterday, we keep whatever prev-day
+   * the 09:10 pre-market cron cached and only refresh today's numbers.
    */
-  private refreshDaySummary(symbol: string, exchange: string): void {
+  private updateDaySummaryFromCandles(symbol: string, exchange: string, candles: CandleData[]): void {
+    if (!candles.length) return;
     const key = this.daySummaryKey(symbol, exchange);
-    const cached = this.daySummaryCache.get(key);
-    if (cached?.data) return; // already have valid OHLC for today — reused all day
-    if (this.daySummaryInflight.has(key)) return;
-    // After a failure, wait out the cooldown before trying again. Retrying on
-    // every poll multiplies Angel One request pressure exactly when it's
-    // already rate-limiting (which is why the fetch failed in the first place).
-    const lastFail = this.daySummaryLastFail.get(key);
-    if (lastFail && Date.now() - lastFail < CrossoverService.DAY_SUMMARY_RETRY_COOLDOWN_MS) return;
-    this.daySummaryInflight.add(key);
-    const exch = (exchange as 'NSE' | 'NFO' | 'BSE') || 'NSE';
-    // If the 09:10 pre-market cron already cached prev-day OHLC, this is a
-    // single cheap LTP call (today's open); otherwise the full fetch runs.
-    const warmedPrevDay = this.prevDayCache.get(key) ?? null;
-    fetchDaySummary(symbol, exch, undefined, warmedPrevDay)
-      .then((data) => {
-        if (data) {
-          this.daySummaryCache.set(key, { ts: Date.now(), data });
-          this.daySummaryLastFail.delete(key);
-        } else {
-          this.daySummaryLastFail.set(key, Date.now());
-        }
-      })
-      .catch((e) => {
-        this.daySummaryLastFail.set(key, Date.now());
-        console.warn(`[ohlc-context] fetch failed for ${symbol} ${exch}:`, e?.message || e);
-      })
-      .finally(() => this.daySummaryInflight.delete(key));
+    const derived = deriveDaySummaryFromCandles(candles);
+    if (!derived) return; // no candles for today yet — leave cache as-is
+
+    // If the intraday window didn't reach a prior trading day, fall back to the
+    // pre-market cron's prev-day so the block still shows "Prev day: …".
+    if (!derived.yesterday) {
+      const warmedPrev = this.prevDayCache.get(key);
+      if (warmedPrev) derived.yesterday = warmedPrev;
+    }
+    this.daySummaryCache.set(key, { ts: Date.now(), data: derived });
   }
 
   /**
@@ -433,6 +430,80 @@ export class CrossoverService {
   private getCachedDaySummary(symbol: string, exchange: string): import('./daySummary').DaySummary | null {
     const entry = this.daySummaryCache.get(this.daySummaryKey(symbol, exchange));
     return entry?.data ?? null;
+  }
+
+  /**
+   * Fire a standalone alert the moment price crosses a prev-day reference level
+   * (high / low / close). Independent of EMA/RSI. Evaluated on the two most
+   * recent CLOSED candles (candle-close based, like the crossover engine) and
+   * gated by lastLevelCandleTs so each candle is only checked once — the alert
+   * fires exactly on the breaking candle, never repeated while price stays
+   * beyond the level. Zero extra API calls (candles already fetched).
+   */
+  private handleLevelCrosses(config: WatchConfig, candles: CandleData[]): void {
+    if (candles.length < 2) return;
+    const summary = this.getCachedDaySummary(config.symbol, config.exchange);
+    if (!summary?.yesterday) return;
+
+    const intervalMs = timeframeToMs(config.timeframe);
+    const now = Date.now();
+    const closed = [...candles]
+      .filter((c) => c.close > 0 && c.timestamp + intervalMs <= now)
+      .sort((a, b) => a.timestamp - b.timestamp);
+    if (closed.length < 2) return;
+
+    const cur = closed[closed.length - 1];
+    const prev = closed[closed.length - 2];
+
+    const watchKey = watchJobKey(config);
+    // Only evaluate a given candle once.
+    if (this.lastLevelCandleTs.get(watchKey) === cur.timestamp) return;
+    this.lastLevelCandleTs.set(watchKey, cur.timestamp);
+
+    const crosses = detectLevelCrosses(prev.close, cur.close, summary.yesterday);
+    if (crosses.length === 0) return;
+
+    const currency = config.currency || 'INR';
+    const tsIso = new Date(cur.timestamp).toISOString();
+
+    for (const x of crosses) {
+      const alert: LevelCrossAlert = {
+        id: randomUUID(),
+        type: 'levelCross',
+        symbol: config.symbol,
+        timeframe: config.timeframe,
+        level: x.level,
+        crossDirection: x.direction,
+        levelValue: parseFloat(x.levelValue.toFixed(2)),
+        price: parseFloat(cur.close.toFixed(2)),
+        currency,
+        timestamp: tsIso,
+        source: 'level-cross',
+      };
+      console.log(
+        `🚨 LEVEL CROSS: ${alert.symbol} crossed ${alert.crossDirection} prev day ${alert.level} (${alert.levelValue}) at ₹${alert.price}`,
+      );
+
+      // Socket broadcast
+      if (config.userId && this.io) this.io.to(`user:${config.userId}`).emit('alert:levelCross', alert);
+      else this.io?.emit('alert:levelCross', alert);
+
+      if (config.userId) {
+        sendLevelCrossTelegramAlert(config.userId, alert).catch((e) =>
+          console.warn('Level-cross Telegram alert failed:', e?.message || e),
+        );
+        pushLevelCrossToUser(config.userId, alert).catch((e) =>
+          console.warn('Level-cross Expo push failed:', e?.message || e),
+        );
+        getClerkUserEmail(config.userId)
+          .then((email) => sendLevelCrossAlertEmail(alert, email, summary))
+          .catch((e) => console.warn('Level-cross email alert failed:', e));
+      } else {
+        sendLevelCrossAlertEmail(alert, null, summary).catch((e) =>
+          console.warn('Level-cross email alert failed:', e),
+        );
+      }
+    }
   }
 
   private handleAlerts(alerts: CrossoverAlert[], userId?: string, exchange?: string, candleData?: CandleData[]): void {
