@@ -28,7 +28,19 @@ function parseExpiry(expiry: string | undefined): number {
 }
 let scripMasterCache: ScripRow[] | null = null;
 let scripMasterFetchedAt = 0;
-const SCRIP_MASTER_TTL_MS = 60 * 60 * 1000; // 1 hour
+// Refresh once per day. The scrip master is a ~34MB / 161k-row file; parsing it
+// spikes heap by hundreds of MB, so doing it hourly (during market hours) was
+// tripping Render's memory limit and force-restarting the service. The list
+// barely changes intraday, so daily is plenty.
+const SCRIP_MASTER_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+// We only ever resolve/search NSE, NFO and BSE. Dropping MCX/CDS/NCDEX/BFO/NCO
+// rows on load cuts the retained array from ~161k to ~59k rows.
+const USED_SEGMENTS = new Set(['NSE', 'NFO', 'BSE']);
+
+// symboltoken is stable for the whole trading day, so cache exchange:symbol →
+// {symboltoken, tradingsymbol} and stop re-resolving on every candle/LTP fetch.
+const resolveCache = new Map<string, { v: { symboltoken: string; tradingsymbol: string }; at: number }>();
+const RESOLVE_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
 
 // RFC 4648 base32 alphabet
 const B32_ALPHA = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -388,12 +400,33 @@ export class AngelOneDataSource {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60_000); // FIX: 60s (was 30s)
     try {
+      // Free the previous cache before we allocate the new one, so the old and
+      // new full arrays don't coexist in heap during the parse (that overlap
+      // was the memory spike).
+      scripMasterCache = null;
       const res = await fetch(SCRIP_MASTER_URL, { signal: controller.signal });
       const raw = await res.text();
-      const parsed = JSON.parse(raw) as ScripRow[] | Record<string, ScripRow>;
-      scripMasterCache = Array.isArray(parsed) ? parsed : Object.values(parsed || {});
+      const parsedUnknown = JSON.parse(raw) as ScripRow[] | Record<string, ScripRow>;
+      const parsed = Array.isArray(parsedUnknown) ? parsedUnknown : Object.values(parsedUnknown || {});
+      // Retain ONLY used segments and ONLY the 6 fields we read — the raw parsed
+      // objects carry strike/lotsize/tick_size/freeze_qty we never touch. The
+      // fat `parsed`/`raw` are dropped as soon as this returns, leaving a much
+      // smaller resident array.
+      const slim: ScripRow[] = [];
+      for (const r of parsed) {
+        if (!USED_SEGMENTS.has(r.exch_seg || '')) continue;
+        slim.push({
+          token: r.token,
+          symbol: r.symbol,
+          name: r.name,
+          exch_seg: r.exch_seg,
+          instrumenttype: r.instrumenttype,
+          expiry: r.expiry,
+        });
+      }
+      scripMasterCache = slim;
       scripMasterFetchedAt = Date.now();
-      console.log('[angelOne.scripMaster] loaded', scripMasterCache.length, 'rows');
+      console.log(`[angelOne.scripMaster] loaded ${parsed.length} rows, retained ${slim.length} (NSE/NFO/BSE)`);
       return scripMasterCache;
     } finally {
       clearTimeout(timeout);
@@ -646,13 +679,32 @@ export class AngelOneDataSource {
     return { nse, bse };
   }
 
-  /** Resolve symbol for a given exchange (NSE, NFO, BSE). Used for fetch candles/LTP with correct exchange. Falls back to scrip master when searchScrip API fails. */
+  /**
+   * Resolve symbol for a given exchange (NSE, NFO, BSE). Used for candle/LTP
+   * fetches. Falls back to scrip master when searchScrip API fails.
+   *
+   * A day-scoped token cache sits in front: symboltoken is stable for the whole
+   * trading day (and beyond), so once resolved we never re-hit searchScrip for
+   * that symbol again today. Before this, every candle AND every LTP fetch did
+   * its own searchScrip call — doubling request volume and, when searchScrip
+   * failed with "Token missing", triggering repeated session re-logins.
+   */
   async resolveSymbolForExchange(symbol: string, exchange: 'NSE' | 'NFO' | 'BSE'): Promise<{ symboltoken: string; tradingsymbol: string } | null> {
+    const clean = symbol.toUpperCase().replace(/\.(NS|BO)$/i, '').trim();
+    const cacheKey = `${exchange}:${clean}`;
+    const cached = resolveCache.get(cacheKey);
+    if (cached && Date.now() - cached.at <= RESOLVE_TTL_MS) return cached.v;
+
+    const resolved = await this.resolveSymbolForExchangeUncached(symbol, exchange, clean);
+    if (resolved) resolveCache.set(cacheKey, { v: resolved, at: Date.now() });
+    return resolved;
+  }
+
+  private async resolveSymbolForExchangeUncached(symbol: string, exchange: 'NSE' | 'NFO' | 'BSE', clean: string): Promise<{ symboltoken: string; tradingsymbol: string } | null> {
     if (exchange === 'NSE') return this.resolveSymbol(symbol);
     if (exchange === 'BSE') return this.resolveSymbolBSE(symbol);
     if (exchange === 'NFO') {
       await this.ensureSession();
-      const clean = symbol.toUpperCase().replace(/\.(NS|BO)$/i, '').trim();
       try {
         const json = await this.searchScripApi('NFO', clean);
         if (json.status && Array.isArray(json.data) && json.data.length > 0) {
@@ -665,7 +717,7 @@ export class AngelOneDataSource {
       } catch (e: any) {
         if (e?.message === 'Auth') {
           await this.refreshToken();
-          return this.resolveSymbolForExchange(symbol, 'NFO');
+          return this.resolveSymbolForExchangeUncached(symbol, 'NFO', clean);
         }
         const fallback = await this.resolveSymbolFromScripMaster(clean, 'NFO');
         if (fallback) return fallback;

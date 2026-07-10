@@ -11,7 +11,7 @@ import { UniversalMarketDataSource } from './dynamicMarketSource';
 import { addAlert, getAlerts } from './alertStore';
 import {
   WatchConfig, CrossoverAlert, RsiAlert, LevelCrossAlert, PriceUpdate, EmaUpdate,
-  MonitorStatus, PushSubscriptionData,
+  MonitorStatus, PushSubscriptionData, PriceData,
 } from './types';
 import {
   sendCrossoverAlertEmail,
@@ -103,6 +103,9 @@ export class CrossoverService {
   /** Last closed-candle timestamp we've already evaluated for prev-day level
    *  crosses, per watch key — so each candle is checked once (fire-once). */
   private lastLevelCandleTs: Map<string, number> = new Map();
+  /** TTL cache for the separate RSI-timeframe fetch (e.g. 1d), keyed by
+   *  symbol:exchange:rsiTf — avoids re-pulling daily candles every 30s. */
+  private rsiTfCache: Map<string, { at: number; data: PriceData | null }> = new Map();
 
   constructor(io: any, options?: { onSubscriptionExpired?: OnSubscriptionExpired }) {
     this.io = io;
@@ -354,11 +357,14 @@ export class CrossoverService {
       // Uses candles already fetched; no extra API call.
       this.handleLevelCrosses(config, priceData.candleData || []);
 
-      // Separate RSI timeframe: fetch and process RSI candles independently
+      // Separate RSI timeframe: fetch and process RSI candles independently.
+      // Cached with a TTL scaled to the candle interval — a 1d RSI candle
+      // barely moves in a few minutes, so re-fetching it every 30s poll was
+      // pure waste (and the biggest chunk of redundant getCandleData traffic).
       const rsiTf = config.rsi?.timeframe;
       if (config.rsi?.enabled && rsiTf && rsiTf !== config.timeframe) {
         try {
-          const rsiData = await this.dataSource.fetchTimeframeData(config.symbol, rsiTf, (config.exchange as 'NSE' | 'NFO' | 'BSE') || 'NSE');
+          const rsiData = await this.fetchRsiTimeframeCached(config.symbol, rsiTf, (config.exchange as 'NSE' | 'NFO' | 'BSE') || 'NSE');
           if (rsiData?.candleData && rsiData.candleData.length > 0) {
             const rsiAlerts = this.engine.processNewRsiCandles(
               config.symbol,
@@ -420,6 +426,22 @@ export class CrossoverService {
       if (warmedPrev) derived.yesterday = warmedPrev;
     }
     this.daySummaryCache.set(key, { ts: Date.now(), data: derived });
+  }
+
+  /**
+   * Fetch the separate RSI-timeframe candles with a TTL cache. A higher-
+   * timeframe RSI candle (esp. 1d) barely changes between 30s polls, so we
+   * re-fetch at most once per (interval/6), clamped to [60s, 5min]. Cuts the
+   * bulk of redundant daily-candle traffic that was hammering the throttle.
+   */
+  private async fetchRsiTimeframeCached(symbol: string, rsiTf: string, exchange: 'NSE' | 'NFO' | 'BSE'): Promise<PriceData | null> {
+    const key = `${symbol.toUpperCase()}:${exchange}:${rsiTf}`;
+    const ttl = Math.min(5 * 60_000, Math.max(60_000, Math.floor(timeframeToMs(rsiTf) / 6)));
+    const cached = this.rsiTfCache.get(key);
+    if (cached && Date.now() - cached.at < ttl) return cached.data;
+    const data = await this.dataSource.fetchTimeframeData(symbol, rsiTf, exchange);
+    this.rsiTfCache.set(key, { at: Date.now(), data });
+    return data;
   }
 
   /**
