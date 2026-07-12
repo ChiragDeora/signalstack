@@ -28,6 +28,9 @@ function parseExpiry(expiry: string | undefined): number {
 }
 let scripMasterCache: ScripRow[] | null = null;
 let scripMasterFetchedAt = 0;
+// Dedup concurrent loads: without this, several callers that all miss the cache
+// at startup each fetch+parse the 34MB file at once — a multi-hundred-MB spike.
+let scripMasterLoadPromise: Promise<ScripRow[]> | null = null;
 // Refresh once per day. The scrip master is a ~34MB / 161k-row file; parsing it
 // spikes heap by hundreds of MB, so doing it hourly (during market hours) was
 // tripping Render's memory limit and force-restarting the service. The list
@@ -397,6 +400,16 @@ export class AngelOneDataSource {
     if (scripMasterCache && Date.now() - scripMasterFetchedAt <= SCRIP_MASTER_TTL_MS) {
       return scripMasterCache;
     }
+    // Coalesce concurrent misses onto a single fetch+parse instead of each
+    // caller parsing the 34MB file independently.
+    if (scripMasterLoadPromise) return scripMasterLoadPromise;
+    scripMasterLoadPromise = this.loadScripMaster().finally(() => {
+      scripMasterLoadPromise = null;
+    });
+    return scripMasterLoadPromise;
+  }
+
+  private async loadScripMaster(): Promise<ScripRow[]> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60_000); // FIX: 60s (was 30s)
     try {

@@ -13,14 +13,14 @@
   "prefer_related_applications": false,
   "icons": [
     {
-      "src": "/signalstack-logo.png",
-      "sizes": "640x640",
+      "src": "/app-icon-512.png",
+      "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/signalstack-logo.png",
-      "sizes": "640x640",
+      "src": "/app-icon-512.png",
+      "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"
     }
