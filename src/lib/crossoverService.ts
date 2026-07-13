@@ -28,7 +28,7 @@ import { getClerkUserEmail } from './clerkUserEmail';
 import { buildCrossoverChartAttachment } from './alertChart';
 import { appendAlertLog, appendRsiAlertLog } from './alertLogger';
 import { getAllWatches } from './watchPersistence';
-import { fetchDaySummary, fetchPrevDayOHLC, deriveDaySummaryFromCandles, detectLevelCrosses, buildOhlcContextBlock, istDateOf, OHLC_UNAVAILABLE } from './daySummary';
+import { fetchDaySummary, fetchPrevDayOHLC, deriveDaySummaryFromCandles, detectLevelCrosses, istDateOf } from './daySummary';
 import { randomUUID } from 'crypto';
 import { CandleData } from './types';
 
@@ -353,8 +353,9 @@ export class CrossoverService {
         this.handleRsiAlerts(rsi, config.userId, config.exchange);
       }
 
-      // Prev-day level crosses — independent of EMA/RSI, fired once per cross.
-      // Uses candles already fetched; no extra API call.
+      // Standalone prev-day level-cross alert (fired once when price crosses
+      // prev-day high/low/close). Kept per user request — this is separate from
+      // the removed per-alert OHLC block. Uses candles already fetched.
       this.handleLevelCrosses(config, priceData.candleData || []);
 
       // Separate RSI timeframe: fetch and process RSI candles independently.
@@ -518,10 +519,10 @@ export class CrossoverService {
           console.warn('Level-cross Expo push failed:', e?.message || e),
         );
         getClerkUserEmail(config.userId)
-          .then((email) => sendLevelCrossAlertEmail(alert, email, summary))
+          .then((email) => sendLevelCrossAlertEmail(alert, email))
           .catch((e) => console.warn('Level-cross email alert failed:', e));
       } else {
-        sendLevelCrossAlertEmail(alert, null, summary).catch((e) =>
+        sendLevelCrossAlertEmail(alert, null).catch((e) =>
           console.warn('Level-cross email alert failed:', e),
         );
       }
@@ -550,21 +551,9 @@ export class CrossoverService {
 
       addAlert(alert, userId);
 
-      // Synchronously read cached OHLC reference levels (refreshed in the
-      // background by pollSymbol). No wait, no fallback fetch: if the cache
-      // is empty for this symbol, buildOhlcContextBlock returns the
-      // "OHLC data unavailable" string per spec so the block is never
-      // silently dropped from the alert.
+      // OHLC context intentionally omitted from alerts (per user request).
+      // Day summary is still read for the internal xlsx log only.
       const cachedDaySummary = this.getCachedDaySummary(alert.symbol, exchange ?? 'NSE');
-      alert.ohlcContext = buildOhlcContextBlock(
-        alert.crossoverType,
-        alert.price,
-        cachedDaySummary,
-        alert.currency,
-      );
-      if (alert.ohlcContext === OHLC_UNAVAILABLE) {
-        console.warn(`[ohlc-context] unavailable at alert time for ${alert.symbol} ${exchange ?? 'NSE'}`);
-      }
 
       // Emit to user-specific room if userId is set, otherwise broadcast
       if (userId && this.io) {
@@ -598,7 +587,7 @@ export class CrossoverService {
       });
       Promise.all([userEmailPromise, chartPromise]).then(([email, chartAttachment]) => {
         const attachments = chartAttachment ? [chartAttachment] : undefined;
-        return sendCrossoverAlertEmail(alert, email, attachments, cachedDaySummary);
+        return sendCrossoverAlertEmail(alert, email, attachments);
       })
         .then(() => {
           // Log to xlsx after the email has been dispatched (best-effort)
@@ -641,19 +630,9 @@ export class CrossoverService {
       if (lastTs && lastTs === alert.timestamp) continue;
       this.lastRsiAlertByKey.set(dedupKey, alert.timestamp);
 
-      // Synchronously read cached OHLC reference levels (refreshed in the
-      // background by pollAndProcess). Empty cache → attach the
-      // "OHLC data unavailable" fallback so the block is never dropped.
+      // OHLC context intentionally omitted from alerts (per user request).
+      // Day summary is still read for the internal xlsx log only.
       const cachedDaySummary = this.getCachedDaySummary(alert.symbol, exchange ?? 'NSE');
-      alert.ohlcContext = buildOhlcContextBlock(
-        alert.direction,
-        alert.price,
-        cachedDaySummary,
-        alert.currency,
-      );
-      if (alert.ohlcContext === OHLC_UNAVAILABLE) {
-        console.warn(`[ohlc-context] unavailable at alert time for ${alert.symbol} ${exchange ?? 'NSE'}`);
-      }
 
       // Socket broadcast
       if (userId && this.io) {
@@ -667,7 +646,7 @@ export class CrossoverService {
 
       // Email
       userEmailPromise
-        .then((email) => sendRsiAlertEmail(alert, email, cachedDaySummary))
+        .then((email) => sendRsiAlertEmail(alert, email))
         .catch((e) => console.warn('RSI email alert failed:', e));
 
       // xlsx log — best-effort, fire-and-forget, does not block channels above

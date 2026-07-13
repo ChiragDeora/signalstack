@@ -8,7 +8,6 @@
 import nodemailer from 'nodemailer';
 import type { Transporter } from 'nodemailer';
 import { isMarketOpen } from './marketHours';
-import type { DaySummary } from './daySummary';
 
 const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
 
@@ -208,15 +207,25 @@ function formatAlertTimestamp(isoTimestamp: string): string {
 // ============================================================================
 const ACCENT_BULL = '#10b981';
 const ACCENT_BEAR = '#ef4444';
+const ACCENT_BRAND = '#1f6dff';
 const INK = '#0f172a';
 const INK_2 = '#475569';
 const MUTED = '#64748b';
-const BORDER = '#e2e8f0';
+const BORDER = '#e6ebf2';
 const SURFACE = '#ffffff';
-const SURFACE_2 = '#f6f8fc';
-const CARD_BG = '#fafbfd';
+const SURFACE_2 = '#f1f5f9';
+const PAGE_BG = '#eef2f8';
+const BULL_TINT = '#ecfdf5';
+const BEAR_TINT = '#fef2f2';
+const BULL_TINT_BORDER = '#bbf7d0';
+const BEAR_TINT_BORDER = '#fecaca';
 const FONT_STACK = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif";
 const MONO = "SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace";
+
+// Public app URL for the logo image + CTA link. Override with NEXT_PUBLIC_APP_URL.
+const APP_URL = (process.env.NEXT_PUBLIC_APP_URL || 'https://signalstack-105d.onrender.com').replace(/\/+$/, '');
+const LOGO_URL = `${APP_URL}/app-icon-512.png`;
+const CURRENCY_SYMBOL: Record<string, string> = { INR: '₹', USD: '$', GBP: '£', EUR: '€', JPY: '¥' };
 
 function escapeHtml(s: string): string {
   return s
@@ -231,100 +240,49 @@ function fmtNum(v: number): string {
   return v.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-/**
- * Structured day-levels section: prev-day O/H/L/C as labeled stat cells,
- * today's open with a colored gap chip, and a one-line status badge. Falls
- * back to a muted single-line note when the summary is missing (fetch failed)
- * so the section is never silently dropped.
- */
-function renderDayLevels(
-  daySummary: DaySummary | null | undefined,
-  price: number,
-): string {
-  const y = daySummary?.yesterday;
-  const todayOpen = daySummary?.today?.open;
-  const valid =
-    y && Number.isFinite(y.open) && Number.isFinite(y.high) &&
-    Number.isFinite(y.low) && Number.isFinite(y.close) &&
-    Number.isFinite(todayOpen ?? NaN) && (todayOpen as number) > 0;
+function money(v: number, currency: string): string {
+  const sym = CURRENCY_SYMBOL[currency];
+  return sym ? `${sym}${fmtNum(v)}` : `${currency} ${fmtNum(v)}`;
+}
 
-  if (!valid) {
-    return `
-    <tr>
-      <td style="padding:14px 24px 4px 24px;">
-        <div style="font-size:12px;color:${MUTED};font-style:italic;">OHLC data unavailable for this alert.</div>
-      </td>
-    </tr>`;
-  }
-
-  const gapPct = ((todayOpen as number) - y.close) / y.close * 100;
-  const gapUp = gapPct >= 0;
-  const gapColor = gapUp ? ACCENT_BULL : ACCENT_BEAR;
-  const gapStr = `${gapUp ? '+' : ''}${gapPct.toFixed(2)}%`;
-
-  let statusTxt: string;
-  let statusColor: string;
-  if (price > y.high) { statusTxt = 'Above prev day high'; statusColor = ACCENT_BULL; }
-  else if (price < y.low) { statusTxt = 'Below prev day low'; statusColor = ACCENT_BEAR; }
-  else if (price > y.close) { statusTxt = 'Above prev day close'; statusColor = ACCENT_BULL; }
-  else if (price < y.close) { statusTxt = 'Below prev day close'; statusColor = ACCENT_BEAR; }
-  else { statusTxt = 'At prev day close'; statusColor = INK_2; }
-
-  const cell = (label: string, value: number) => `
-    <td width="25%" style="padding:8px 6px;text-align:center;background:${SURFACE_2};border:1px solid ${BORDER};">
-      <div style="font-size:10px;font-weight:700;color:${MUTED};letter-spacing:.05em;">${label}</div>
-      <div style="font-family:${MONO};font-size:13px;font-weight:700;color:${INK};margin-top:2px;">${fmtNum(value)}</div>
-    </td>`;
-
+/** Accent-filled CTA button (bulletproof: table cell holds the color). */
+function ctaButton(label: string, url: string, accent: string): string {
   return `
-    <tr>
-      <td style="padding:16px 24px 4px 24px;">
-        <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:${MUTED};margin-bottom:8px;">Previous day</div>
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:separate;border-spacing:4px 0;">
-          <tr>
-            ${cell('OPEN', y.open)}
-            ${cell('HIGH', y.high)}
-            ${cell('LOW', y.low)}
-            ${cell('CLOSE', y.close)}
-          </tr>
-        </table>
-        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px;">
-          <tr>
-            <td style="font-size:12.5px;color:${INK_2};">
-              Today open&nbsp;
-              <span style="font-family:${MONO};font-weight:700;color:${INK};">${fmtNum(todayOpen as number)}</span>
-              &nbsp;<span style="display:inline-block;padding:2px 8px;border-radius:999px;font-family:${MONO};font-size:11px;font-weight:700;color:#ffffff;background:${gapColor};">${gapStr}</span>
-            </td>
-            <td align="right" style="font-size:12.5px;font-weight:700;color:${statusColor};white-space:nowrap;">
-              ● ${statusTxt}
-            </td>
-          </tr>
-        </table>
-      </td>
-    </tr>`;
+        <tr>
+          <td style="padding:16px 28px 4px 28px;">
+            <table role="presentation" cellpadding="0" cellspacing="0"><tr>
+              <td style="border-radius:11px;background:${accent};">
+                <a href="${url}" target="_blank" style="display:inline-block;padding:13px 24px;font-family:${FONT_STACK};font-size:13.5px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:11px;">${escapeHtml(label)} &nbsp;&rarr;</a>
+              </td>
+            </tr></table>
+          </td>
+        </tr>`;
 }
 
 /**
- * Renders the standard alert email shell. `bodyRows` is a string of `<tr>…</tr>`
- * blocks slotted into the main card between the header and the OHLC callout.
+ * Premium alert email shell. Composes: gradient bar → brand header → a
+ * direction-tinted hero (badge + symbol + big price) → type-specific body →
+ * CTA → footer. `bodyRows` is type-specific `<tr>…</tr>` content.
  */
 function renderAlertEmail(opts: {
   direction: 'bullish' | 'bearish';
-  eyebrow: string;   // e.g. "Bullish crossover" or "RSI Overbought cross"
+  eyebrow: string;      // "Bullish crossover", "RSI overbought cross", …
   symbol: string;
+  subtitle: string;     // small line under the symbol
   timeframe: string;
-  bodyRows: string;  // main content rows
-  daySummary?: DaySummary | null;
-  price: number;
+  heroLabel: string;    // e.g. "Price at signal"
+  heroValue: string;    // e.g. "₹1,307.30" (pre-formatted)
+  bodyRows: string;
   timeStr: string;
 }): string {
-  const accent = opts.direction === 'bullish' ? ACCENT_BULL : ACCENT_BEAR;
-  // Gradient top stripe. Solid `background` first as fallback for Outlook
-  // desktop (Word engine ignores linear-gradient and uses the solid color).
-  const stripeGradient =
-    opts.direction === 'bullish'
-      ? 'linear-gradient(90deg,#10b981,#0bb5d6)'
-      : 'linear-gradient(90deg,#ef4444,#f59e0b)';
+  const bull = opts.direction === 'bullish';
+  const accent = bull ? ACCENT_BULL : ACCENT_BEAR;
+  const tint = bull ? BULL_TINT : BEAR_TINT;
+  const tintBorder = bull ? BULL_TINT_BORDER : BEAR_TINT_BORDER;
+  const arrow = bull ? '&#9650;' : '&#9660;'; // ▲ / ▼
+  const stripe = bull
+    ? 'linear-gradient(90deg,#10b981,#0bb5d6)'
+    : 'linear-gradient(90deg,#ef4444,#f59e0b)';
   return `<!doctype html>
 <html>
 <head>
@@ -333,33 +291,60 @@ function renderAlertEmail(opts: {
 <meta name="color-scheme" content="light only">
 <title>${escapeHtml(opts.eyebrow)} · ${escapeHtml(opts.symbol)}</title>
 </head>
-<body style="margin:0;padding:0;background:${SURFACE_2};font-family:${FONT_STACK};color:${INK};">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${SURFACE_2};">
+<body style="margin:0;padding:0;background:${PAGE_BG};font-family:${FONT_STACK};color:${INK};">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${PAGE_BG};">
   <tr>
-    <td align="center" style="padding:24px 12px;">
-      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:${SURFACE};border:1px solid ${BORDER};border-radius:14px;overflow:hidden;box-shadow:0 1px 2px rgba(15,23,42,.04);">
+    <td align="center" style="padding:28px 12px;">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:${SURFACE};border:1px solid ${BORDER};border-radius:18px;overflow:hidden;box-shadow:0 8px 28px rgba(15,23,42,.10);">
         <tr>
-          <td style="height:4px;background:${accent};background:${stripeGradient};line-height:4px;font-size:0;">&nbsp;</td>
+          <td style="height:5px;background:${accent};background:${stripe};line-height:5px;font-size:0;">&nbsp;</td>
         </tr>
+
+        <!-- brand header -->
         <tr>
-          <td style="padding:20px 24px 8px 24px;">
-            <div style="font-size:11.5px;font-weight:700;color:${accent};letter-spacing:.08em;text-transform:uppercase;">
-              ${escapeHtml(opts.eyebrow)}
-            </div>
-            <div style="margin-top:6px;">
-              <span style="font-size:26px;font-weight:800;color:${INK};letter-spacing:-.01em;">${escapeHtml(opts.symbol)}</span>
-              <span style="display:inline-block;margin-left:8px;padding:3px 8px;border-radius:999px;background:${SURFACE_2};border:1px solid ${BORDER};font-family:${MONO};font-size:11px;font-weight:700;color:${INK_2};vertical-align:middle;">${escapeHtml(opts.timeframe)}</span>
-            </div>
+          <td style="padding:18px 28px 4px 28px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+              <td style="vertical-align:middle;">
+                <img src="${LOGO_URL}" width="26" height="26" alt="" style="vertical-align:middle;border-radius:7px;display:inline-block;">
+                <span style="vertical-align:middle;margin-left:9px;font-size:16px;font-weight:800;color:${INK};letter-spacing:-.01em;">Signal<span style="color:${ACCENT_BRAND};">Stack</span></span>
+              </td>
+              <td align="right" style="vertical-align:middle;font-size:10px;font-weight:700;letter-spacing:.12em;color:${MUTED};text-transform:uppercase;">Real-time alert</td>
+            </tr></table>
           </td>
         </tr>
-        ${opts.bodyRows}
-        ${renderDayLevels(opts.daySummary, opts.price)}
+
+        <!-- hero -->
         <tr>
-          <td style="padding:16px 24px 18px 24px;">
+          <td style="padding:10px 28px 4px 28px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${tint};border:1px solid ${tintBorder};border-radius:16px;">
+              <tr><td style="padding:20px 20px 20px 20px;">
+                <span style="display:inline-block;padding:6px 12px;border-radius:999px;background:${accent};color:#ffffff;font-size:11px;font-weight:800;letter-spacing:.05em;">${arrow}&nbsp; ${escapeHtml(opts.eyebrow.toUpperCase())}</span>
+                <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:16px;"><tr>
+                  <td style="vertical-align:bottom;">
+                    <div style="font-size:32px;font-weight:800;color:${INK};letter-spacing:-.02em;line-height:1;">${escapeHtml(opts.symbol)}</div>
+                    <div style="font-size:12px;color:${MUTED};margin-top:5px;">${escapeHtml(opts.subtitle)}</div>
+                  </td>
+                  <td align="right" style="vertical-align:bottom;">
+                    <span style="display:inline-block;padding:5px 11px;border-radius:8px;background:#ffffff;border:1px solid ${tintBorder};font-family:${MONO};font-size:12px;font-weight:700;color:${INK_2};">${escapeHtml(opts.timeframe)}</span>
+                  </td>
+                </tr></table>
+                <div style="margin-top:20px;font-size:10.5px;font-weight:700;letter-spacing:.06em;color:${MUTED};text-transform:uppercase;">${escapeHtml(opts.heroLabel)}</div>
+                <div style="font-family:${MONO};font-size:36px;font-weight:800;color:${accent};margin-top:3px;line-height:1;">${opts.heroValue}</div>
+              </td></tr>
+            </table>
+          </td>
+        </tr>
+
+        ${opts.bodyRows}
+        ${ctaButton('View in SignalStack', APP_URL, accent)}
+
+        <!-- footer -->
+        <tr>
+          <td style="padding:20px 28px 24px 28px;">
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-top:1px solid ${BORDER};">
               <tr>
-                <td style="padding-top:12px;font-size:11px;color:${MUTED};">${escapeHtml(opts.timeStr)}</td>
-                <td align="right" style="padding-top:12px;font-size:11px;color:${MUTED};">SignalStack</td>
+                <td style="padding-top:14px;font-size:11px;color:${MUTED};">${escapeHtml(opts.timeStr)}</td>
+                <td align="right" style="padding-top:14px;font-size:11px;color:${MUTED};">EMA · RSI alerts</td>
               </tr>
             </table>
           </td>
@@ -372,32 +357,44 @@ function renderAlertEmail(opts: {
 </html>`;
 }
 
+/** EMA fast/slow value cards + plain crossover sentence. */
 function renderCrossoverBody(alert: {
   crossoverType: 'bullish' | 'bearish';
   fastPeriod: number;
   slowPeriod: number;
-  price: number;
-  currency: string;
+  fastEmaValue: number;
+  slowEmaValue: number;
 }): string {
-  const accent = alert.crossoverType === 'bullish' ? ACCENT_BULL : ACCENT_BEAR;
-  const dir = alert.crossoverType === 'bullish' ? 'above' : 'below';
-  const priceLine = `${escapeHtml(alert.currency)} ${alert.price.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const bull = alert.crossoverType === 'bullish';
+  const accent = bull ? ACCENT_BULL : ACCENT_BEAR;
+  const dir = bull ? 'above' : 'below';
+  const arrow = bull ? '&#9650;' : '&#9660;';
+  const fastTint = bull ? BULL_TINT : BEAR_TINT;
+  const fastBorder = bull ? BULL_TINT_BORDER : BEAR_TINT_BORDER;
+  const card = (label: string, period: number, val: number, bg: string, border: string) => `
+      <td width="44%" style="background:${bg};border:1px solid ${border};border-radius:12px;padding:12px 14px;">
+        <div style="font-size:10px;font-weight:800;letter-spacing:.06em;color:${MUTED};text-transform:uppercase;">${label} &middot; EMA ${period}</div>
+        <div style="font-family:${MONO};font-size:20px;font-weight:800;color:${INK};margin-top:6px;">${fmtNum(val)}</div>
+      </td>`;
   return `
         <tr>
-          <td style="padding:8px 24px 4px 24px;">
-            <div style="font-size:14px;color:${INK_2};line-height:1.5;">
-              EMA(<strong style="color:${INK};">${alert.fastPeriod}</strong>) crossed <strong style="color:${accent};">${dir}</strong> EMA(<strong style="color:${INK};">${alert.slowPeriod}</strong>)
+          <td style="padding:18px 28px 2px 28px;">
+            <div style="font-size:11px;font-weight:800;letter-spacing:.06em;color:${MUTED};text-transform:uppercase;margin-bottom:11px;">The crossover</div>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+              ${card('Fast', alert.fastPeriod, alert.fastEmaValue, fastTint, fastBorder)}
+              <td width="12%" align="center" style="vertical-align:middle;">
+                <div style="width:30px;height:30px;line-height:30px;border-radius:15px;background:${accent};color:#ffffff;font-size:12px;font-weight:800;text-align:center;margin:0 auto;">${arrow}</div>
+              </td>
+              ${card('Slow', alert.slowPeriod, alert.slowEmaValue, SURFACE_2, BORDER)}
+            </tr></table>
+            <div style="margin-top:14px;font-size:13.5px;color:${INK_2};line-height:1.5;">
+              EMA <strong style="color:${INK};">${alert.fastPeriod}</strong> crossed <strong style="color:${accent};">${dir}</strong> EMA <strong style="color:${INK};">${alert.slowPeriod}</strong>
             </div>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:12px 24px 8px 24px;">
-            <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:${MUTED};">Price at signal</div>
-            <div style="font-family:${MONO};font-size:22px;font-weight:800;color:${accent};margin-top:4px;">${priceLine}</div>
           </td>
         </tr>`;
 }
 
+/** RSI value + horizontal gauge with OB/OS markers. */
 function renderRsiBody(alert: {
   signalType: string;
   direction: 'bullish' | 'bearish';
@@ -406,31 +403,32 @@ function renderRsiBody(alert: {
   period: number;
   overbought: number;
   oversold: number;
-  price: number;
-  currency: string;
 }, signalLabel: string): string {
   const accent = alert.direction === 'bullish' ? ACCENT_BULL : ACCENT_BEAR;
-  const priceLine = `${escapeHtml(alert.currency)} ${alert.price.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const rsi = Math.max(0, Math.min(100, alert.rsiValue));
+  const fillPct = rsi.toFixed(1);
+  const restPct = (100 - rsi).toFixed(1);
   return `
         <tr>
-          <td style="padding:8px 24px 4px 24px;">
-            <div style="font-size:14px;color:${INK_2};line-height:1.5;">
-              <strong style="color:${INK};">${escapeHtml(signalLabel)}</strong>
-              <span style="color:${MUTED};">·</span>
-              RSI(<strong style="color:${INK};">${alert.period}</strong>)
-              <span style="color:${MUTED};">=</span>
-              <strong style="color:${accent};font-family:${MONO};">${alert.rsiValue.toFixed(2)}</strong>
-              <span style="color:${MUTED};font-family:${MONO};font-size:12px;">(prev ${alert.previousRsi.toFixed(2)})</span>
-            </div>
-            <div style="font-size:12px;color:${MUTED};margin-top:6px;font-family:${MONO};">
-              overbought ${alert.overbought} / oversold ${alert.oversold}
-            </div>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:12px 24px 8px 24px;">
-            <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:${MUTED};">Price at signal</div>
-            <div style="font-family:${MONO};font-size:22px;font-weight:800;color:${accent};margin-top:4px;">${priceLine}</div>
+          <td style="padding:18px 28px 2px 28px;">
+            <div style="font-size:11px;font-weight:800;letter-spacing:.06em;color:${MUTED};text-transform:uppercase;margin-bottom:11px;">${escapeHtml(signalLabel)}</div>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+              <td style="vertical-align:bottom;">
+                <span style="font-family:${MONO};font-size:30px;font-weight:800;color:${accent};">${alert.rsiValue.toFixed(1)}</span>
+                <span style="font-size:12px;color:${MUTED};font-family:${MONO};">&nbsp;RSI(${alert.period})</span>
+              </td>
+              <td align="right" style="vertical-align:bottom;font-size:12px;color:${MUTED};font-family:${MONO};">prev ${alert.previousRsi.toFixed(1)}</td>
+            </tr></table>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:12px;border-radius:999px;overflow:hidden;"><tr>
+              <td width="${fillPct}%" style="background:${accent};height:8px;font-size:0;line-height:8px;">&nbsp;</td>
+              <td width="${restPct}%" style="background:${SURFACE_2};height:8px;font-size:0;line-height:8px;">&nbsp;</td>
+            </tr></table>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:6px;"><tr>
+              <td style="font-size:10px;color:${MUTED};font-family:${MONO};">0</td>
+              <td align="center" style="font-size:10px;color:${MUTED};font-family:${MONO};">OS ${alert.oversold}</td>
+              <td align="center" style="font-size:10px;color:${MUTED};font-family:${MONO};">OB ${alert.overbought}</td>
+              <td align="right" style="font-size:10px;color:${MUTED};font-family:${MONO};">100</td>
+            </tr></table>
           </td>
         </tr>`;
 }
@@ -447,6 +445,8 @@ export async function sendCrossoverAlertEmail(
     crossoverType: 'bullish' | 'bearish';
     fastPeriod: number;
     slowPeriod: number;
+    fastEmaValue: number;
+    slowEmaValue: number;
     price: number;
     currency: string;
     timestamp: string;
@@ -454,7 +454,6 @@ export async function sendCrossoverAlertEmail(
   },
   userEmail?: string | null,
   attachments?: EmailAttachment[],
-  daySummary?: DaySummary | null,
 ): Promise<void> {
   if (!isMarketOpen('NSE')) {
     console.warn(
@@ -488,10 +487,11 @@ export async function sendCrossoverAlertEmail(
     direction: alert.crossoverType,
     eyebrow: `${direction} crossover`,
     symbol: alert.symbol,
+    subtitle: `EMA ${alert.fastPeriod}/${alert.slowPeriod} crossover`,
     timeframe: alert.timeframe,
+    heroLabel: 'Price at signal',
+    heroValue: money(alert.price, alert.currency),
     bodyRows: renderCrossoverBody(alert),
-    daySummary,
-    price: alert.price,
     timeStr,
   });
 
@@ -598,7 +598,6 @@ export async function sendRsiAlertEmail(
     ohlcContext?: string;
   },
   userEmail?: string | null,
-  daySummary?: DaySummary | null,
 ): Promise<void> {
   if (!isMarketOpen('NSE')) {
     console.warn(
@@ -633,10 +632,11 @@ export async function sendRsiAlertEmail(
     direction: alert.direction,
     eyebrow: `RSI ${signalLabel}`,
     symbol: alert.symbol,
+    subtitle: `RSI ${alert.period} signal`,
     timeframe: alert.timeframe,
+    heroLabel: 'Price at signal',
+    heroValue: money(alert.price, alert.currency),
     bodyRows: renderRsiBody(alert, signalLabel),
-    daySummary,
-    price: alert.price,
     timeStr,
   });
 
@@ -663,7 +663,6 @@ export async function sendLevelCrossAlertEmail(
     timestamp: string;
   },
   userEmail?: string | null,
-  daySummary?: DaySummary | null,
 ): Promise<void> {
   if (!isMarketOpen('NSE')) {
     console.warn(
@@ -682,11 +681,13 @@ export async function sendLevelCrossAlertEmail(
   const timeStr = formatAlertTimestamp(alert.timestamp);
   const label = LEVEL_LABEL_EMAIL[alert.level];
   const dir = alert.crossDirection === 'above' ? 'bullish' : 'bearish';
+  const accent = dir === 'bullish' ? ACCENT_BULL : ACCENT_BEAR;
+  const tint = dir === 'bullish' ? BULL_TINT : BEAR_TINT;
+  const tintBorder = dir === 'bullish' ? BULL_TINT_BORDER : BEAR_TINT_BORDER;
   const arrow = alert.crossDirection === 'above' ? '⬆️' : '⬇️';
   const subject = `${arrow} ${alert.symbol}: crossed ${alert.crossDirection} ${label} (${alert.timeframe})`;
-  const accent = dir === 'bullish' ? ACCENT_BULL : ACCENT_BEAR;
-  const priceLine = `${alert.currency} ${alert.price.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  const levelStr = `${alert.currency} ${alert.levelValue.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const priceLine = money(alert.price, alert.currency);
+  const levelStr = money(alert.levelValue, alert.currency);
 
   const text =
     `${alert.symbol} crossed ${alert.crossDirection} ${label}.\n` +
@@ -697,18 +698,22 @@ export async function sendLevelCrossAlertEmail(
 
   const bodyRows = `
         <tr>
-          <td style="padding:8px 24px 4px 24px;">
-            <div style="font-size:14px;color:${INK_2};line-height:1.5;">
-              Crossed <strong style="color:${accent};">${alert.crossDirection}</strong> ${escapeHtml(label)}
-              <span style="color:${MUTED};">·</span>
-              <span style="font-family:${MONO};color:${INK};">${levelStr}</span>
+          <td style="padding:18px 28px 2px 28px;">
+            <div style="font-size:11px;font-weight:800;letter-spacing:.06em;color:${MUTED};text-transform:uppercase;margin-bottom:11px;">The level break</div>
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr>
+              <td width="48%" style="background:${tint};border:1px solid ${tintBorder};border-radius:12px;padding:12px 14px;">
+                <div style="font-size:10px;font-weight:800;letter-spacing:.06em;color:${MUTED};text-transform:uppercase;">${escapeHtml(label)}</div>
+                <div style="font-family:${MONO};font-size:20px;font-weight:800;color:${INK};margin-top:6px;">${levelStr}</div>
+              </td>
+              <td width="4%">&nbsp;</td>
+              <td width="48%" style="background:${SURFACE_2};border:1px solid ${BORDER};border-radius:12px;padding:12px 14px;">
+                <div style="font-size:10px;font-weight:800;letter-spacing:.06em;color:${MUTED};text-transform:uppercase;">Price now</div>
+                <div style="font-family:${MONO};font-size:20px;font-weight:800;color:${accent};margin-top:6px;">${priceLine}</div>
+              </td>
+            </tr></table>
+            <div style="margin-top:14px;font-size:13.5px;color:${INK_2};line-height:1.5;">
+              Price crossed <strong style="color:${accent};">${alert.crossDirection}</strong> ${escapeHtml(label)}
             </div>
-          </td>
-        </tr>
-        <tr>
-          <td style="padding:12px 24px 8px 24px;">
-            <div style="font-size:10.5px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:${MUTED};">Price</div>
-            <div style="font-family:${MONO};font-size:22px;font-weight:800;color:${accent};margin-top:4px;">${priceLine}</div>
           </td>
         </tr>`;
 
@@ -716,10 +721,11 @@ export async function sendLevelCrossAlertEmail(
     direction: dir,
     eyebrow: `Crossed ${alert.crossDirection} ${label}`,
     symbol: alert.symbol,
+    subtitle: `Prev-day ${alert.level} break`,
     timeframe: alert.timeframe,
+    heroLabel: 'Price now',
+    heroValue: priceLine,
     bodyRows,
-    daySummary,
-    price: alert.price,
     timeStr,
   });
 
