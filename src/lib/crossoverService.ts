@@ -353,11 +353,6 @@ export class CrossoverService {
         this.handleRsiAlerts(rsi, config.userId, config.exchange);
       }
 
-      // Standalone prev-day level-cross alert (fired once when price crosses
-      // prev-day high/low/close). Kept per user request — this is separate from
-      // the removed per-alert OHLC block. Uses candles already fetched.
-      this.handleLevelCrosses(config, priceData.candleData || []);
-
       // Separate RSI timeframe: fetch and process RSI candles independently.
       // Cached with a TTL scaled to the candle interval — a 1d RSI candle
       // barely moves in a few minutes, so re-fetching it every 30s poll was
